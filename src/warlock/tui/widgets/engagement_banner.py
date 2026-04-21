@@ -19,7 +19,7 @@ class EngagementBanner(Static):
         self.auth = auth
 
     def on_mount(self) -> None:
-        self.update(self._render(self.status))
+        self.update(self._format_banner(self.status))
         self.set_interval(self.POLL_SECONDS, self._refresh)
 
     async def _refresh(self) -> None:
@@ -30,9 +30,9 @@ class EngagementBanner(Static):
                 self.status = r.json()
         except Exception:  # noqa: BLE001
             self.status = {"mode": "loading", "error": True}
-        self.update(self._render(self.status))
+        self.update(self._format_banner(self.status))
 
-    def _render(self, st: dict) -> str:
+    def _format_banner(self, st: dict) -> str:
         mode = st.get("mode", "loading")
         if mode == "on":
             scope = st.get("scope") or {}
