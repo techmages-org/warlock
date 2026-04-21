@@ -4,7 +4,7 @@ Type=Application
 Name=Warlock
 GenericName=Command Center
 Comment=Field kit TUI — radios, pentest, engagements
-Exec=lxterminal --title=Warlock -e /usr/local/bin/warlock
+Exec=lxterminal --title=Warlock --geometry=140x42 -e /usr/local/bin/warlock-launch
 Icon=warlock
 Terminal=false
 Categories=System;

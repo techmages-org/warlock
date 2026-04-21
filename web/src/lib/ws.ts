@@ -15,7 +15,7 @@ export function openEventBus(onEvent: (evt: WireEvent) => void): () => void {
         const e = JSON.parse(m.data) as WireEvent;
         onEvent(e);
       } catch {
-        /* ignore */
+        /* ignore malformed frames */
       }
     };
     ws.onclose = () => {

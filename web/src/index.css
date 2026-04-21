@@ -1,28 +1,208 @@
+/* Warlock HUD base styles — self-hosted IBM Plex Mono (woff2 via @fontsource,
+ * static weights 400/500/600 bundled into dist — no CDN), phosphor token set,
+ * four restrained animations, and an ambient hex-mesh background. Tailwind
+ * layered on top.
+ *
+ * Note on "variable": IBM Plex does not ship a true variable font on
+ * Fontsource today, so we pull the three discrete weights we actually use —
+ * 400 body, 500 labels, 600 headings — rather than waste bandwidth on the
+ * full family. Single family; weight + tracking + color carry hierarchy. */
+
+@import "@fontsource/ibm-plex-mono/400.css";
+@import "@fontsource/ibm-plex-mono/500.css";
+@import "@fontsource/ibm-plex-mono/600.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-@layer base {
-  :root {
-    color-scheme: dark;
-  }
-  body {
-    @apply bg-warlock-bg text-slate-200;
-  }
+/* ---------- Design tokens ---------- */
+:root {
+  color-scheme: dark;
+
+  --bg-base:    #05070f;
+  --bg-tile:    #0a0e1c;
+  --bg-elev:    #0f1526;
+  --bg-strip:   #020308;
+
+  --line-dim:   #1a2439;
+  --line-mid:   #2a3656;
+
+  --txt-dim:    #4a5878;
+  --txt-body:   #9daecf;
+  --txt-hi:     #e6ecfa;
+
+  --violet-bright: #c4b5fd;
+  --violet-base:   #a78bfa;
+  --violet-deep:   #7c3aed;
+
+  --amber-bright:  #ffc569;
+  --amber-base:    #ffb347;
+  --amber-deep:    #c77700;
+
+  --mint-safe:     #14ff8f;
+  --cyan-signal:   #00e5ff;
+  --pink-alert:    #ff2975;
+
+  --glow-amber:  0 0 8px rgba(255,179,71,0.45), 0 0 2px rgba(255,179,71,0.85);
+  --glow-violet: 0 0 10px rgba(167,139,250,0.4), 0 0 3px rgba(167,139,250,0.8);
+  --glow-mint:   0 0 8px rgba(20,255,143,0.4);
+  --glow-pink:   0 0 10px rgba(255,41,117,0.55), 0 0 3px rgba(255,41,117,0.9);
 }
 
+/* ---------- Base element styles ---------- */
+@layer base {
+  html, body, #root {
+    height: 100%;
+  }
+
+  body {
+    background-color: var(--bg-base);
+    /* Inline hex-mesh: two thin hex lines on a transparent tile, ~0.035 alpha.
+     * 56×64 tile, uses viewBox coords that repeat cleanly. */
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='56' height='64' viewBox='0 0 56 64'><g fill='none' stroke='%23a78bfa' stroke-opacity='0.035' stroke-width='1'><path d='M14 0 L0 8 L0 24 L14 32 L28 24 L28 8 Z'/><path d='M42 0 L28 8 L28 24 L42 32 L56 24 L56 8 Z'/><path d='M14 32 L0 40 L0 56 L14 64'/><path d='M42 32 L28 40 L28 56 L42 64'/><path d='M56 40 L42 32'/></g></svg>");
+    background-repeat: repeat;
+    color: var(--txt-body);
+    font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.8125rem;
+    line-height: 1.25rem;
+    font-weight: 400;
+    letter-spacing: 0;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    font-feature-settings: "cv02", "cv03", "cv04";
+  }
+
+  /* Tabular numerals everywhere a number renders. */
+  .num, .tabular {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "cv02", "cv03", "cv04", "tnum";
+  }
+
+  /* Default heading weights align with the HUD scale. */
+  h1, h2, h3, h4 {
+    color: var(--txt-hi);
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+
+  /* Focus ring uses violet, readable against dark bg. */
+  *:focus-visible {
+    outline: 1px solid var(--violet-base);
+    outline-offset: 2px;
+  }
+
+  /* Scrollbars blend into the HUD. */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: var(--bg-base); }
+  ::-webkit-scrollbar-thumb { background: var(--line-mid); border-radius: 2px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--violet-deep); }
+}
+
+/* ---------- Reusable component-ish classes ---------- */
 @layer components {
-  .wl-card {
-    @apply bg-warlock-panel border border-warlock-border rounded-lg p-4;
+  .hud-label {
+    font-size: 0.6875rem;
+    line-height: 1rem;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--txt-dim);
   }
-  .wl-btn {
-    @apply px-3 py-1.5 rounded border border-warlock-border hover:border-warlock-accent
-           text-sm transition-colors;
+
+  .hud-title {
+    font-size: 0.9375rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--txt-hi);
   }
-  .wl-btn-danger {
-    @apply wl-btn text-warlock-danger border-warlock-danger hover:bg-warlock-danger/10;
+
+  .hud-strip {
+    background-color: var(--bg-strip);
+    color: var(--txt-body);
+    font-size: 0.6875rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
   }
-  .wl-badge {
-    @apply inline-block px-2 py-0.5 rounded text-xs font-bold;
+
+  .hud-tile {
+    position: relative;
+    background-color: var(--bg-tile);
+    border: 1px solid var(--line-dim);
+  }
+
+  .hud-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0.3125rem 0.75rem;
+    font-size: 0.6875rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--txt-body);
+    background-color: var(--bg-elev);
+    border: 1px solid var(--line-dim);
+    transition: color 120ms linear, border-color 120ms linear;
+  }
+  .hud-btn:hover {
+    color: var(--amber-base);
+    border-color: var(--amber-deep);
+  }
+  .hud-btn[data-active="true"] {
+    color: var(--violet-bright);
+    border-color: var(--violet-base);
+    box-shadow: var(--glow-violet);
+  }
+  .hud-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .hud-btn-danger {
+    color: var(--pink-alert);
+    border-color: var(--pink-alert);
+    background-color: rgba(255, 41, 117, 0.06);
+  }
+  .hud-btn-danger:hover {
+    color: #fff;
+    background-color: rgba(255, 41, 117, 0.18);
+    border-color: var(--pink-alert);
+  }
+
+  .hud-input {
+    background-color: var(--bg-base);
+    border: 1px solid var(--line-dim);
+    color: var(--txt-hi);
+    padding: 0.375rem 0.5rem;
+    font-family: inherit;
+    font-size: 0.8125rem;
+  }
+  .hud-input:focus {
+    border-color: var(--violet-base);
+    box-shadow: 0 0 0 1px var(--violet-deep);
+    outline: none;
+  }
+
+  /* Engagement scanline sweep overlay — only active with .is-engaged. */
+  .engagement-scanline {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    pointer-events: none;
+  }
+  .engagement-scanline::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 40%;
+    height: 100%;
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(255, 255, 255, 0.10) 50%,
+      transparent 100%
+    );
+    animation: scanline-sweep 2.4s linear infinite;
   }
 }

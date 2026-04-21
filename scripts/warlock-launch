@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# warlock-launch — TUI launcher that pauses after exit so the terminal window
+# doesn't vanish before you can read any output. Used by the desktop icon.
+set -o pipefail
+clear
+/usr/local/bin/warlock "$@"
+rc=$?
+echo
+if [[ $rc -eq 0 ]]; then
+    echo "— Warlock exited cleanly (code 0) —"
+else
+    echo "— Warlock exited with code $rc —"
+fi
+echo "(this window will stay open; press Enter to close)"
+read -r _ || true

@@ -1,13 +1,13 @@
 // Minimal API client. All endpoints are same-origin when served from FastAPI,
 // or proxied through Vite in dev.
 
-export async function apiGet<T = any>(path: string): Promise<T> {
+export async function apiGet<T = unknown>(path: string): Promise<T> {
   const r = await fetch(path, { credentials: "include" });
   if (!r.ok) throw new Error(`${r.status} ${r.statusText} — ${path}`);
   return (await r.json()) as T;
 }
 
-export async function apiPost<T = any>(path: string, body?: unknown): Promise<T> {
+export async function apiPost<T = unknown>(path: string, body?: unknown): Promise<T> {
   const r = await fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -66,4 +66,9 @@ export type MeshNode = {
   lat?: number;
   lon?: number;
   alt?: number;
+};
+
+export type Version = {
+  name: string;
+  version: string;
 };
