@@ -3,10 +3,10 @@ Version=1.0
 Type=Application
 Name=Warlock (Web)
 GenericName=Command Center Web Dashboard
-Comment=Warlock web dashboard in the browser
-Exec=xdg-open http://localhost:7777
+Comment=Warlock web dashboard in Chromium
+Exec=chromium --new-window --app=http://localhost:7777
 Icon=warlock
 Terminal=false
-Categories=System;Security;Network;
+Categories=System;
 StartupNotify=true
 Keywords=warlock;dashboard;web
