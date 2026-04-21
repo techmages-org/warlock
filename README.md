@@ -63,6 +63,23 @@ Environment variables read at startup (see `src/warlock/config.py`):
 | `WARLOCK_GPSD_HOST` | `127.0.0.1` | gpsd host |
 | `WARLOCK_GPSD_PORT` | `2947` | gpsd port |
 
+### Rotating the web password
+
+The default web-UI password is `warlock`. **Change it on first use.** Use a
+systemd drop-in so the secret lives outside the unit file:
+
+```bash
+sudo systemctl edit warlock
+# In the drop-in editor, paste:
+[Service]
+Environment="WARLOCK_WEB_PASSWORD=<your-new-password>"
+# Save and exit, then apply:
+sudo systemctl restart warlock
+```
+
+The drop-in is written to `/etc/systemd/system/warlock.service.d/override.conf`
+and survives package redeploys.
+
 ## Engagement mode
 
 - OFF by default. Only passive tools run.
@@ -115,11 +132,4 @@ after the M.2 NVMe migration (Phase 12).
 1. `sudo systemctl status warlock` → confirm active.
 2. `curl http://127.0.0.1:7777/api/health` → `{"ok":true}`.
 3. `warlock` → TUI launches, dashboard renders.
-4. Set `WARLOCK_WEB_PASSWORD` in `/etc/systemd/system/warlock.service.d/password.conf`:
-
-   ```
-   [Service]
-   Environment=WARLOCK_WEB_PASSWORD=<strong-password>
-   ```
-
-   Then `sudo systemctl daemon-reload && sudo systemctl restart warlock`.
+4. Rotate `WARLOCK_WEB_PASSWORD` — see [Rotating the web password](#rotating-the-web-password) above.
