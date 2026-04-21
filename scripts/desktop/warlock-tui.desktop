@@ -4,9 +4,9 @@ Type=Application
 Name=Warlock
 GenericName=Command Center
 Comment=Field kit TUI — radios, pentest, engagements
-Exec=x-terminal-emulator -T "Warlock" -e /usr/local/bin/warlock
+Exec=lxterminal --title=Warlock -e /usr/local/bin/warlock
 Icon=warlock
 Terminal=false
-Categories=System;Security;Network;
+Categories=System;
 StartupNotify=true
 Keywords=warlock;sdr;meshtastic;pentest;lora;gps
