@@ -2,11 +2,11 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { EngagementBanner } from "./components/EngagementBanner";
 import { Nav } from "./components/Nav";
 import { Dashboard } from "./pages/Dashboard";
+import { Gps } from "./pages/Gps";
 import { Mesh } from "./pages/Mesh";
 import { Stub } from "./pages/Stub";
 
 const STUBBED = [
-  "gps",
   "sdr",
   "wifi_recon",
   "wifi_offensive",
@@ -27,6 +27,7 @@ export default function App() {
           <Route path="/" element={<Navigate to="/dashboard" replace />} />
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/mesh" element={<Mesh />} />
+          <Route path="/gps" element={<Gps />} />
           {STUBBED.map((mid) => (
             <Route key={mid} path={`/${mid}`} element={<Stub moduleId={mid} />} />
           ))}
