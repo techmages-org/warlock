@@ -3,8 +3,8 @@ Version=1.0
 Type=Application
 Name=Warlock (Web)
 GenericName=Command Center Web Dashboard
-Comment=Warlock web dashboard in Chromium
-Exec=chromium --new-window --app=http://localhost:7777
+Comment=Warlock web dashboard in Chromium (kiosk-style app window)
+Exec=chromium --user-data-dir=/home/sem/.config/chromium-warlock --app=http://localhost:7777
 Icon=warlock
 Terminal=false
 Categories=System;
