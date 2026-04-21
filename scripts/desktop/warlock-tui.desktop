@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Warlock
+GenericName=Command Center
+Comment=Field kit TUI — radios, pentest, engagements
+Exec=x-terminal-emulator -T "Warlock" -e /usr/local/bin/warlock
+Icon=warlock
+Terminal=false
+Categories=System;Security;Network;
+StartupNotify=true
+Keywords=warlock;sdr;meshtastic;pentest;lora;gps

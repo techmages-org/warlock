@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# warlock CLI shim — launches the Textual TUI against the local daemon.
+set -euo pipefail
+
+WARLOCK_ROOT="${WARLOCK_ROOT:-/opt/warlock}"
+PYTHON="$WARLOCK_ROOT/.venv/bin/python"
+
+if [[ ! -x "$PYTHON" ]]; then
+    echo "warlock: backend venv missing at $PYTHON" >&2
+    echo "warlock: run $WARLOCK_ROOT/scripts/install.sh first" >&2
+    exit 1
+fi
+
+exec "$PYTHON" -m warlock.tui.app "$@"

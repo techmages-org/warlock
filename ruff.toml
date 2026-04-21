@@ -1,0 +1,9 @@
+target-version = "py311"
+line-length = 110
+
+[lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[format]
+quote-style = "double"
