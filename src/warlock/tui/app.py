@@ -105,10 +105,13 @@ class WarlockApp(App):
             from warlock.tui.screens.mesh import MeshScreen
 
             return MeshScreen(api_url=self.api_url, auth=self.basic_auth)
+        if module_id == "gps":
+            from warlock.tui.screens.gps import GpsScreen
+
+            return GpsScreen(api_url=self.api_url, auth=self.basic_auth)
         from warlock.tui.screens.stub import StubScreen
 
         labels = {
-            "gps": "GPS",
             "sdr": "SDR",
             "wifi_recon": "WiFi Recon",
             "wifi_offensive": "Offensive WiFi",

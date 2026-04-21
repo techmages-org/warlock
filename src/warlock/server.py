@@ -1,16 +1,17 @@
 """FastAPI application — wires modules, event bus, static web build."""
 from __future__ import annotations
 
+import base64
 import logging
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
+from starlette.requests import HTTPConnection
 
 from warlock import __version__
 from warlock.api import engagements as engagements_api
@@ -23,27 +24,46 @@ from warlock.registry import load_modules
 log = logging.getLogger("warlock.server")
 
 _settings = get_settings()
-_basic = HTTPBasic(auto_error=False)
 
 # Paths that bypass HTTP basic auth — health endpoints and the WS bus
 # (WS subscription is protected at the app level via a token for now; TODO).
 _UNAUTHED_PATHS: set[str] = {"/api/health", "/api/version", "/ws"}
 
 
-def _check_auth(request: Request, creds: HTTPBasicCredentials | None = Depends(_basic)) -> None:
-    # Skip auth entirely if the operator left the default password empty.
+def _check_auth(conn: HTTPConnection) -> None:
+    """Verify HTTP Basic credentials on every HTTP request.
+
+    Uses ``HTTPConnection`` (base of Request+WebSocket) so the dependency is
+    safely attachable to routers that also contain WebSocket endpoints.
+    WebSocket scopes bypass Basic auth entirely — the WS endpoints are all
+    LAN-trusted for now (same as ``/ws``).
+    """
     if not _settings.web_password:
         return
-    if request.url.path in _UNAUTHED_PATHS or request.url.path.startswith("/ws/"):
+    if conn.url.path in _UNAUTHED_PATHS or conn.url.path.startswith("/ws/"):
         return
-    if creds is None:
+    if conn.scope.get("type") == "websocket":
+        return
+    auth_header = conn.headers.get("authorization", "")
+    if not auth_header.lower().startswith("basic "):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="auth required",
             headers={"WWW-Authenticate": "Basic"},
         )
-    ok_user = secrets.compare_digest(creds.username, _settings.web_username)
-    ok_pass = secrets.compare_digest(creds.password, _settings.web_password)
+    try:
+        decoded = base64.b64decode(auth_header.split(" ", 1)[1]).decode(
+            "utf-8", errors="replace"
+        )
+        username, _, password = decoded.partition(":")
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"malformed basic header: {e}",
+            headers={"WWW-Authenticate": "Basic"},
+        ) from None
+    ok_user = secrets.compare_digest(username, _settings.web_username)
+    ok_pass = secrets.compare_digest(password, _settings.web_password)
     if not (ok_user and ok_pass):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
