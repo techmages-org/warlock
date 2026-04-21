@@ -62,10 +62,18 @@ class DashboardScreen(Widget):
             f"{cpu.get('percent', '?')}%",
             f"load {cpu.get('load_1m')} / {cpu.get('load_5m')} / {cpu.get('load_15m')}",
         )
-        temp = d.get("temp_c")
-        sev = "ok" if (temp is None or temp < 70) else "warn" if temp < 80 else "err"
+        temp_c = d.get("temp_c")
+        temp_f = d.get("temp_f")
+        # Fahrenheit thresholds: warn > 158°F (70°C), err > 176°F (80°C)
+        sev = "ok" if (temp_f is None or temp_f < 158) else "warn" if temp_f < 176 else "err"
+        if temp_f is not None and temp_c is not None:
+            temp_display = f"{temp_f}°F ({temp_c}°C)"
+        elif temp_f is not None:
+            temp_display = f"{temp_f}°F"
+        else:
+            temp_display = "n/a"
         self._tiles["temp"].update_values(
-            f"{temp}°C" if temp is not None else "n/a",
+            temp_display,
             d.get("throttled") or "",
             severity=sev,
         )
