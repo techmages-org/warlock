@@ -46,9 +46,9 @@ export function Dashboard() {
         />
         <Tile
           title="Temp"
-          value={s.temp_c != null ? `${s.temp_c}°C` : "n/a"}
+          value={s.temp_f != null ? (s.temp_c != null ? `${s.temp_f}°F (${s.temp_c}°C)` : `${s.temp_f}°F`) : "n/a"}
           subtitle={s.throttled || undefined}
-          severity={s.temp_c == null ? "warn" : s.temp_c > 80 ? "err" : s.temp_c > 70 ? "warn" : "ok"}
+          severity={s.temp_f == null ? "warn" : s.temp_f > 176 ? "err" : s.temp_f > 158 ? "warn" : "ok"}
         />
         <Tile
           title="Memory"
