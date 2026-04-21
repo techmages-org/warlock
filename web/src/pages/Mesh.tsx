@@ -1,6 +1,16 @@
 import { useEffect, useState } from "react";
 import { apiGet, apiPost, type MeshNode } from "../lib/api";
 
+
+function formatRelTime(epochSec: number): string {
+  const now = Math.floor(Date.now() / 1000);
+  const diff = Math.max(0, now - epochSec);
+  if (diff < 60) return `${diff}s ago`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ${Math.floor((diff % 3600) / 60)}m ago`;
+  return `${Math.floor(diff / 86400)}d ago`;
+}
+
 export function Mesh() {
   const [nodes, setNodes] = useState<MeshNode[]>([]);
   const [err, setErr] = useState<string | null>(null);
@@ -67,27 +77,34 @@ export function Mesh() {
           <table className="w-full text-sm">
             <thead className="text-warlock-muted">
               <tr>
-                <th className="text-left p-1">ID</th>
-                <th className="text-left p-1">Short</th>
-                <th className="text-left p-1">Long</th>
+                <th className="text-left p-1">Node</th>
                 <th className="text-right p-1">SNR</th>
                 <th className="text-right p-1">Hops</th>
                 <th className="text-right p-1">Batt</th>
-                <th className="text-left p-1">Last heard</th>
+                <th className="text-right p-1">Last heard</th>
               </tr>
             </thead>
             <tbody>
-              {nodes.map((n) => (
-                <tr key={n.id} className="border-t border-warlock-border">
-                  <td className="p-1 text-warlock-accent">{String(n.id).slice(0, 12)}</td>
-                  <td className="p-1">{n.short_name ?? ""}</td>
-                  <td className="p-1">{n.long_name ?? ""}</td>
-                  <td className="p-1 text-right">{n.snr ?? ""}</td>
-                  <td className="p-1 text-right">{n.hops_away ?? ""}</td>
-                  <td className="p-1 text-right">{n.battery_pct != null ? `${n.battery_pct}%` : ""}</td>
-                  <td className="p-1">{n.last_heard ?? ""}</td>
-                </tr>
-              ))}
+              {nodes.map((n) => {
+                const longN = n.long_name && n.long_name !== "Meshtastic Node" ? n.long_name : (n.short_name ?? String(n.id).slice(0, 12));
+                const shortN = n.short_name ?? "";
+                const relHeard = n.last_heard != null ? formatRelTime(n.last_heard) : "";
+                return (
+                  <tr key={n.id} className="border-t border-warlock-border">
+                    <td className="p-1">
+                      <div className="font-semibold text-warlock-text">{longN}</div>
+                      <div className="text-xs text-warlock-muted">
+                        {shortN && <span className="text-warlock-accent">[{shortN}]</span>}
+                        <span className="ml-2">{String(n.id)}</span>
+                      </div>
+                    </td>
+                    <td className="p-1 text-right">{n.snr != null ? `${n.snr} dB` : "—"}</td>
+                    <td className="p-1 text-right">{n.hops_away != null ? n.hops_away : "—"}</td>
+                    <td className="p-1 text-right">{n.battery_pct != null ? `${n.battery_pct}%` : "—"}</td>
+                    <td className="p-1 text-right text-warlock-muted">{relHeard}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}
