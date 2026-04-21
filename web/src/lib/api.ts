@@ -40,6 +40,7 @@ export type DashboardStatus = {
   cpu: { load_1m: number; load_5m: number; load_15m: number; percent: number; count: number };
   memory: { total_mb: number; available_mb: number; percent: number };
   temp_c: number | null;
+  temp_f: number | null;
   throttled: string | null;
   disk_root_mb_free: number;
   disk_root_percent: number;
