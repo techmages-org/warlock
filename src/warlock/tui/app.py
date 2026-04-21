@@ -109,16 +109,25 @@ class WarlockApp(App):
             from warlock.tui.screens.gps import GpsScreen
 
             return GpsScreen(api_url=self.api_url, auth=self.basic_auth)
+        if module_id == "ops":
+            from warlock.tui.screens.ops import OpsScreen
+
+            return OpsScreen(api_url=self.api_url, auth=self.basic_auth)
+        if module_id == "wifi_recon":
+            from warlock.tui.screens.wifi_recon import WifiReconScreen
+
+            return WifiReconScreen(api_url=self.api_url, auth=self.basic_auth)
+        if module_id == "sdr":
+            from warlock.tui.screens.sdr import SdrScreen
+
+            return SdrScreen(api_url=self.api_url, auth=self.basic_auth)
         from warlock.tui.screens.stub import StubScreen
 
         labels = {
-            "sdr": "SDR",
-            "wifi_recon": "WiFi Recon",
             "wifi_offensive": "Offensive WiFi",
             "net_recon": "Net Recon",
             "sdr_offensive": "Offensive SDR",
             "esp32_companion": "ESP32 Companion",
-            "ops": "Operations",
             "system": "System",
         }
         return StubScreen(module_id=module_id, label=labels.get(module_id, module_id.title()))
