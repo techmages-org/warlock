@@ -139,6 +139,21 @@ def create_app() -> FastAPI:
         @app.get("/", response_class=HTMLResponse)
         def root() -> HTMLResponse:
             return HTMLResponse((web_dist / "index.html").read_text())
+
+        # SPA fallback — serve index.html for any client-side route the SPA owns.
+        # Excludes /api/*, /ws/*, /web/* (those have their own handlers/mounts).
+        @app.get("/{full_path:path}", response_class=HTMLResponse)
+        def spa_fallback(full_path: str) -> HTMLResponse:
+            if (
+                full_path.startswith("api/")
+                or full_path.startswith("ws/")
+                or full_path.startswith("web/")
+                or full_path == "favicon.ico"
+                or full_path == "robots.txt"
+            ):
+                from fastapi import HTTPException
+                raise HTTPException(status_code=404, detail="Not Found")
+            return HTMLResponse((web_dist / "index.html").read_text())
     else:
         @app.get("/", response_class=JSONResponse)
         def root_nobuild() -> JSONResponse:
