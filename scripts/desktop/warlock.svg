@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <title>Warlock</title>
+  <!-- Hexagonal badge (flat-top) -->
+  <polygon points="64,6 116,36 116,92 64,122 12,92 12,36"
+           fill="#0a0f1e" stroke="#ffffff" stroke-width="3"
+           stroke-linejoin="round"/>
+  <!-- Subtle inner glow ring -->
+  <polygon points="64,16 107,41 107,87 64,112 21,87 21,41"
+           fill="none" stroke="#ff7a1a" stroke-width="1.2"
+           stroke-opacity="0.35" stroke-linejoin="round"/>
+  <!-- Stylized W in amber -->
+  <path d="M 32 42 L 46 92 L 56 62 L 64 82 L 72 62 L 82 92 L 96 42"
+        fill="none" stroke="#ff7a1a" stroke-width="9"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

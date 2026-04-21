@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+.env
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+*.egg
+
+# SQLite / Warlock runtime data
+warlock.db
+warlock.db-*
+*.sqlite
+*.sqlite3
+/data/
+
+# Node / Vite
+node_modules/
+web/dist/
+*.log
+npm-debug.log*
+.vite/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Secrets
+.env.local
+.env.*.local
+secrets.yaml

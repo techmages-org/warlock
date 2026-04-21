@@ -1,0 +1,27 @@
+[Unit]
+Description=Warlock Command Center
+After=network-online.target meshtasticd.service gpsd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sem
+Group=sem
+WorkingDirectory=/opt/warlock
+Environment="WARLOCK_DATA=/home/sem/warlock"
+Environment="WARLOCK_HOST=0.0.0.0"
+Environment="WARLOCK_PORT=7777"
+ExecStart=/opt/warlock/.venv/bin/python -m warlock
+Restart=on-failure
+RestartSec=3
+RuntimeDirectory=warlock
+RuntimeDirectoryMode=0750
+
+# Hardening (mild — this daemon needs to reach meshtasticd, gpsd, filesystem)
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/sem/warlock /run/warlock /opt/warlock
+
+[Install]
+WantedBy=multi-user.target
