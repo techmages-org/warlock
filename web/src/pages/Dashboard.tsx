@@ -7,7 +7,8 @@ import {
   StatusLED,
   Tile,
   type LEDColor,
-} from "../components/hud";
+} from "../components/hud"
+import { AudioSettings } from "../components/AudioSettings";
 
 type Status = DashboardStatus | null;
 
@@ -230,6 +231,7 @@ export function Dashboard() {
           </ul>
         </Tile>
       </div>
-    </div>
+      <div className="col-span-12 mt-3"><AudioSettings /></div>
+      </div>
   );
 }
