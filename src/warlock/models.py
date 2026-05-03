@@ -66,3 +66,33 @@ class Alert(Base):
     source: Mapped[str] = mapped_column(String(32), default="")
     message: Mapped[str] = mapped_column(Text, default="")
     acked: Mapped[bool] = mapped_column(default=False)
+
+
+class Host(Base):
+    """Cumulative host inventory populated by net_recon scans."""
+    __tablename__ = "hosts"
+    ip: Mapped[str] = mapped_column(String(45), primary_key=True)
+    mac: Mapped[str] = mapped_column(String(17), default="", index=True)
+    vendor: Mapped[str] = mapped_column(String(128), default="")
+    hostname: Mapped[str] = mapped_column(String(256), default="")
+    ports: Mapped[list] = mapped_column(JSON, default=list)
+    os_guess: Mapped[str] = mapped_column(String(128), default="")
+    first_seen: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    last_seen: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
+    note: Mapped[str] = mapped_column(Text, default="")
+
+
+class Scan(Base):
+    """net_recon scan history (one row per ARP sweep or nmap profile run)."""
+    __tablename__ = "scans"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    target: Mapped[str] = mapped_column(String(256))
+    profile: Mapped[str] = mapped_column(String(32), default="quick")
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    job_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    hosts_found: Mapped[int] = mapped_column(default=0)
+    raw_xml: Mapped[str] = mapped_column(Text, default="")
+    summary: Mapped[dict] = mapped_column(JSON, default=dict)
+    engagement_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
