@@ -121,14 +121,20 @@ class WarlockApp(App):
             from warlock.tui.screens.sdr import SdrScreen
 
             return SdrScreen(api_url=self.api_url, auth=self.basic_auth)
+        if module_id == "net_recon":
+            from warlock.tui.screens.net_recon import NetReconScreen
+
+            return NetReconScreen(api_url=self.api_url, auth=self.basic_auth)
+        if module_id == "system":
+            from warlock.tui.screens.system import SystemScreen
+
+            return SystemScreen(api_url=self.api_url, auth=self.basic_auth)
         from warlock.tui.screens.stub import StubScreen
 
         labels = {
             "wifi_offensive": "Offensive WiFi",
-            "net_recon": "Net Recon",
             "sdr_offensive": "Offensive SDR",
             "esp32_companion": "ESP32 Companion",
-            "system": "System",
         }
         return StubScreen(module_id=module_id, label=labels.get(module_id, module_id.title()))
 

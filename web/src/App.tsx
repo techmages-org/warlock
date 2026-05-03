@@ -6,18 +6,18 @@ import { apiGet, type ModuleInfo } from "./lib/api";
 import { Dashboard } from "./pages/Dashboard";
 import { Gps } from "./pages/Gps";
 import { Mesh } from "./pages/Mesh";
+import { NetRecon } from "./pages/NetRecon";
 import { Ops } from "./pages/Ops";
 import { Sdr } from "./pages/Sdr";
 import { Stub } from "./pages/Stub";
+import { System } from "./pages/System";
 import { WifiRecon } from "./pages/WifiRecon";
 
 // Modules still rendered via the fallback StubPanel (no dedicated page yet).
 const STUBBED = [
   "wifi_offensive",
-  "net_recon",
   "sdr_offensive",
   "esp32_companion",
-  "system",
 ];
 
 function ModuleRail() {
@@ -77,6 +77,9 @@ export default function App() {
           <Route path="/wifi_recon" element={<WifiRecon />} />
           <Route path="/wifi-recon" element={<WifiRecon />} />
           <Route path="/sdr" element={<Sdr />} />
+          <Route path="/net_recon" element={<NetRecon />} />
+          <Route path="/net-recon" element={<NetRecon />} />
+          <Route path="/system" element={<System />} />
           {STUBBED.map((mid) => (
             <Route key={mid} path={`/${mid}`} element={<Stub moduleId={mid} />} />
           ))}
