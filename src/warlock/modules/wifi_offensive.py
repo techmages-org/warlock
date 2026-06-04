@@ -125,50 +125,93 @@ def _resolve_wordlist(name: str | None) -> Path:
 # --------------------------------------------------------------------------- #
 # Monitor-mode control (mirrors wifi_recon: prefer the MT7921 helper, fall back
 # to `iw`). All offensive tools run against the monitor iface.
+#
+# Teardown invariant: after _restore_managed() the operator's adapter MUST be
+# back under its canonical name `wlan1` in managed mode — never stranded as the
+# monitor-mode `mon0`. We trust the helper only if it actually achieves that;
+# otherwise we pin the name ourselves (defends against the shared helper bug
+# where `wlan-mt7921 managed` leaves the iface named mon0).
 # --------------------------------------------------------------------------- #
-async def _run_helper(action: str, timeout: float = 10.0) -> str:
-    """Drive the MT7921 helper (monitor|managed), best-effort, falling back to
-    ``iw dev <wlan1> set type ...``. Swallows errors so cleanup never raises.
-    """
-    have_helper = bool(shutil.which("wlan-mt7921")) or Path(MT_HELPER).exists()
-    have_iface = Path(f"/sys/class/net/{WLAN_IFACE}").exists()
-    if not have_helper and not have_iface:
-        log.debug("no MT7921 helper or %s present; skipping '%s'", WLAN_IFACE, action)
-        return ""
+def _have_helper() -> bool:
+    return bool(shutil.which("wlan-mt7921")) or Path(MT_HELPER).exists()
 
-    out = ""
-    if have_helper:
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                MT_HELPER, action,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            ob, eb = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            out = ((ob or b"") + (eb or b"")).decode("utf-8", errors="replace")
-            if proc.returncode == 0:
-                return out
-        except Exception as e:  # noqa: BLE001
-            log.warning("wlan-mt7921 %s failed: %s", action, e)
 
-    iw_type = "monitor" if action == "monitor" else "managed"
+def _iface_exists(name: str) -> bool:
+    return Path(f"/sys/class/net/{name}").exists()
+
+
+async def _sh(*argv: str, timeout: float = 10.0) -> tuple[int, str]:
+    """Run a command, returning (returncode, combined-output). Never raises."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "sudo", "-n", "iw", "dev", WLAN_IFACE, "set", "type", iw_type,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         ob, eb = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        out += ((ob or b"") + (eb or b"")).decode("utf-8", errors="replace")
+        out = ((ob or b"") + (eb or b"")).decode("utf-8", errors="replace")
+        return (proc.returncode if proc.returncode is not None else -1), out
     except Exception as e:  # noqa: BLE001
-        log.warning("iw %s on %s failed: %s", iw_type, WLAN_IFACE, e)
-    return out
+        log.warning("subprocess %s failed: %s", argv[:2], e)
+        return -1, str(e)
 
 
 async def _ensure_monitor() -> str:
-    return await _run_helper("monitor")
+    """Put the MT7921 attack dongle into monitor mode (exposed as mon0)."""
+    if not _have_helper() and not _iface_exists(WLAN_IFACE) and not _iface_exists(MON_IFACE):
+        log.debug("no MT7921 helper or iface present; skipping monitor")
+        return ""
+    if _have_helper():
+        rc, out = await _sh(MT_HELPER, "monitor")
+        if rc == 0:
+            return out
+        log.warning("wlan-mt7921 monitor rc=%s: %s", rc, out.strip())
+    # Fallback: flip the canonical wlan1 to monitor by name.
+    if _iface_exists(WLAN_IFACE):
+        _, out = await _sh("sudo", "-n", "iw", "dev", WLAN_IFACE, "set", "type", "monitor")
+        return out
+    return ""
+
+
+async def _restore_managed_by_name() -> str:
+    """Pin the canonical `wlan1` managed iface without the helper.
+
+    If monitor mode left the card named `mon0`, bring it down, switch to
+    managed, rename it back to `wlan1`, and bring it up — so the operator's
+    adapter is never stranded as `mon0`.
+    """
+    out: list[str] = []
+    if _iface_exists(MON_IFACE):
+        for argv in (
+            ("sudo", "-n", "ip", "link", "set", MON_IFACE, "down"),
+            ("sudo", "-n", "iw", "dev", MON_IFACE, "set", "type", "managed"),
+            ("sudo", "-n", "ip", "link", "set", MON_IFACE, "name", WLAN_IFACE),
+            ("sudo", "-n", "ip", "link", "set", WLAN_IFACE, "up"),
+        ):
+            rc, o = await _sh(*argv)
+            out.append(f"{' '.join(argv)} -> rc={rc} {o.strip()}".rstrip())
+    elif _iface_exists(WLAN_IFACE):
+        rc, o = await _sh("sudo", "-n", "iw", "dev", WLAN_IFACE, "set", "type", "managed")
+        out.append(f"iw {WLAN_IFACE} managed -> rc={rc} {o.strip()}".rstrip())
+    return "\n".join(out)
 
 
 async def _restore_managed() -> str:
-    return await _run_helper("managed")
+    """Restore the MT7921 adapter to MANAGED mode under its canonical name wlan1.
+
+    Primary path is the `wlan-mt7921 managed` helper (the same call wifi_recon
+    uses). We trust it ONLY if it leaves wlan1 present and mon0 gone; otherwise
+    we pin the name ourselves so wlan1 is never stranded as mon0.
+    """
+    out = ""
+    if _have_helper():
+        rc, out = await _sh(MT_HELPER, "managed")
+        if rc == 0 and _iface_exists(WLAN_IFACE) and not _iface_exists(MON_IFACE):
+            return out
+        log.warning(
+            "wlan-mt7921 managed incomplete (rc=%s wlan1=%s mon0=%s); pinning canonical name",
+            rc, _iface_exists(WLAN_IFACE), _iface_exists(MON_IFACE),
+        )
+    fb = await _restore_managed_by_name()
+    return "\n".join(p for p in (out.strip(), fb) if p)
 
 
 # --------------------------------------------------------------------------- #
