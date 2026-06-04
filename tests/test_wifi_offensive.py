@@ -275,7 +275,10 @@ def test_rogue_ap_command_evil_twin_full_lifecycle(tmp_path):
     assert f"-e {IN_SSID}" in script  # the cloned SSID is in the launch line
     assert "dnsmasq" in script
     assert "python3" in script        # captive portal launched
-    assert "iptables" in script and "DNAT" in script  # :80 redirect to portal
+    # :80 -> portal high port (portal can't bind :80; lighttpd holds it)
+    assert "iptables" in script and "DNAT" in script
+    assert "--dport 80" in script                     # clients still hit :80
+    assert "--to-destination 10.0.0.1:8888" in script  # ...redirected to 8888
     assert "at0" in script            # services bind the airbase tap
     assert "trap cleanup EXIT INT TERM" in script  # teardown wired
     assert "set type managed" in script  # restores wlan1 on exit
@@ -370,6 +373,9 @@ def test_portal_script_is_valid_python(tmp_path):
     compile(src, "<portal>", "exec")  # raises SyntaxError on a bad template
     assert "BaseHTTPRequestHandler" in src
     assert str(tmp_path / "creds.log") in src
+    # Binds the gateway high port, NOT :80 (lighttpd holds :80 on the device).
+    assert "BIND = ('10.0.0.1', 8888)" in src
+    assert '("0.0.0.0", 80)' not in src
 
 
 # --------------------------------------------------------------------------- #

