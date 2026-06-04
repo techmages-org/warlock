@@ -230,29 +230,32 @@ def test_crack_command_no_root_and_right_mode(tmp_path):
 # --------------------------------------------------------------------------- #
 # Rogue-AP builders (evil-twin / karma) — assert structure, no gate, no I/O
 # --------------------------------------------------------------------------- #
-def test_hostapd_mana_conf_evil_twin_clones_ssid():
-    from warlock.modules.wifi_offensive import _hostapd_mana_conf
+def test_airbase_args_evil_twin_clones_ssid():
+    from warlock.modules.wifi_offensive import _airbase_args
 
-    conf = _hostapd_mana_conf(ssid=IN_SSID, channel=6)
-    assert f"ssid={IN_SSID}" in conf
-    assert "channel=6" in conf
-    assert "interface=wlan1" in conf
-    assert "enable_mana" not in conf  # evil-twin is a straight clone, no MANA
+    argv = _airbase_args(ssid=IN_SSID, channel=6, karma=False)
+    assert argv[0].endswith("airbase-ng")
+    assert argv[argv.index("-e") + 1] == IN_SSID  # clone the target SSID
+    assert argv[argv.index("-c") + 1] == "6"      # fixed channel
+    assert argv[-1] == "mon0"                       # consumes the monitor iface
+    assert "-P" not in argv                          # not karma
 
 
-def test_hostapd_mana_conf_karma_enables_mana():
-    from warlock.modules.wifi_offensive import _hostapd_mana_conf
+def test_airbase_args_karma_responds_to_all_probes():
+    from warlock.modules.wifi_offensive import _airbase_args
 
-    conf = _hostapd_mana_conf(ssid=IN_SSID, channel=1, karma=True)
-    assert "enable_mana=1" in conf
-    assert "mana_loud=1" in conf  # respond to all directed probes
+    argv = _airbase_args(ssid=None, channel=1, karma=True)
+    assert "-P" in argv                              # respond to ALL probes
+    assert argv[argv.index("-C") + 1] == "30"        # beacon probed SSIDs
+    assert "-e" not in argv                          # no single target SSID
+    assert argv[-1] == "mon0"
 
 
 def test_dnsmasq_conf_portal_has_dhcp_and_dns_catchall():
     from warlock.modules.wifi_offensive import _dnsmasq_conf
 
     conf = _dnsmasq_conf(portal=True)
-    assert "interface=wlan1" in conf
+    assert "interface=at0" in conf  # dnsmasq binds the airbase-ng tap, not wlan1
     assert "dhcp-range=10.0.0.10,10.0.0.250" in conf
     assert "address=/#/10.0.0.1" in conf  # captive-portal DNS catch-all
     # karma path: DHCP only, no DNS redirect
@@ -260,33 +263,37 @@ def test_dnsmasq_conf_portal_has_dhcp_and_dns_catchall():
 
 
 def test_rogue_ap_command_evil_twin_full_lifecycle(tmp_path):
-    from warlock.modules.wifi_offensive import _rogue_ap_command
+    from warlock.modules.wifi_offensive import _airbase_args, _rogue_ap_command
 
     argv = _rogue_ap_command(
-        hostapd_conf=tmp_path / "h.conf", dnsmasq_conf=tmp_path / "d.conf",
-        portal_py=tmp_path / "p.py", duration=600,
+        airbase_argv=_airbase_args(ssid=IN_SSID, channel=6),
+        dnsmasq_conf=tmp_path / "d.conf", portal_py=tmp_path / "p.py", duration=600,
     )
     assert argv[0] == "bash" and argv[1] == "-c"
     script = argv[2]
-    assert "hostapd-mana" in script
+    assert "airbase-ng" in script
+    assert f"-e {IN_SSID}" in script  # the cloned SSID is in the launch line
     assert "dnsmasq" in script
-    assert "python3" in script  # captive portal launched
-    assert str(tmp_path / "h.conf") in script
+    assert "python3" in script        # captive portal launched
+    assert "iptables" in script and "DNAT" in script  # :80 redirect to portal
+    assert "at0" in script            # services bind the airbase tap
     assert "trap cleanup EXIT INT TERM" in script  # teardown wired
     assert "set type managed" in script  # restores wlan1 on exit
-    assert "sleep 600" in script  # capture window honoured
+    assert "sleep 600" in script      # capture window honoured
 
 
 def test_rogue_ap_command_karma_has_no_portal(tmp_path):
-    from warlock.modules.wifi_offensive import _rogue_ap_command
+    from warlock.modules.wifi_offensive import _airbase_args, _rogue_ap_command
 
     argv = _rogue_ap_command(
-        hostapd_conf=tmp_path / "h.conf", dnsmasq_conf=tmp_path / "d.conf",
-        portal_py=None, duration=300,
+        airbase_argv=_airbase_args(ssid=None, channel=1, karma=True),
+        dnsmasq_conf=tmp_path / "d.conf", portal_py=None, duration=300,
     )
     script = argv[2]
-    assert "hostapd-mana" in script
-    assert "python3" not in script  # karma never serves a captive portal
+    assert "airbase-ng" in script
+    assert "-P" in script             # karma promiscuous probe response
+    assert "python3" not in script    # karma never serves a captive portal
+    assert "iptables" not in script   # no portal -> no redirect
     assert "set type managed" in script  # still restores the radio
 
 
@@ -433,22 +440,29 @@ def test_restore_managed_trusts_helper_when_wlan1_restored(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# Rogue-AP ops (evil-twin / karma): same engagement gate as the injection ops
+# Rogue-AP ops (evil-twin / karma). evil_twin keeps the full target-SSID scope
+# gate; karma is promiscuous so it gates on engagement-active ONLY (target="").
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("op", ["evil_twin", "karma"])
-def test_rogue_ap_refuses_when_engagement_off(client, op):
-    before = _count_violations(IN_SSID)
-    r = client.post(f"/api/wifi_offensive/{op}", json={"ssid": IN_SSID})
+@pytest.mark.parametrize(
+    "op,payload,viol_target",
+    [
+        ("evil_twin", {"ssid": IN_SSID}, IN_SSID),  # violation logged under the SSID
+        ("karma", {}, ""),                          # no target -> empty-target violation
+    ],
+)
+def test_rogue_ap_refuses_when_engagement_off(client, op, payload, viol_target):
+    before = _count_violations(viol_target)
+    r = client.post(f"/api/wifi_offensive/{op}", json=payload)
     assert r.status_code == 403
-    # Refusal is persisted as a scope.violation audit row (engagement-off).
-    assert _count_violations(IN_SSID) == before + 1
+    # Refusal is persisted as a scope.violation audit row (engagement-off);
+    # karma is NOT allowed to bypass the engagement gate.
+    assert _count_violations(viol_target) == before + 1
 
 
-@pytest.mark.parametrize("op", ["evil_twin", "karma"])
-def test_rogue_ap_rejects_out_of_scope_ssid(client, op):
+def test_evil_twin_rejects_out_of_scope_ssid(client):
     _engage(ssids=[IN_SSID])
     before = _count_violations(OUT_SSID)
-    r = client.post(f"/api/wifi_offensive/{op}", json={"ssid": OUT_SSID})
+    r = client.post("/api/wifi_offensive/evil_twin", json={"ssid": OUT_SSID})
     assert r.status_code == 403
     # Out-of-scope SSID refusal writes a scope.violation row.
     assert _count_violations(OUT_SSID) == before + 1
@@ -462,16 +476,16 @@ def test_rogue_ap_bad_ssid_rejected_before_gate(client):
 
 
 def test_rogue_ap_503_when_tools_missing(client, monkeypatch):
-    """In-scope + engaged, but hostapd-mana/dnsmasq absent -> clean 503, and
-    the check lives inside the would-allow branch so it cannot leak tool state
-    to unauthorised callers."""
+    """In-scope + engaged, but airbase-ng/dnsmasq absent -> clean 503, and the
+    check lives inside the would-allow branch so it cannot leak tool state to
+    unauthorised callers."""
     _engage(ssids=[IN_SSID])
     import warlock.modules.wifi_offensive as wo
 
-    monkeypatch.setattr(wo, "_ap_tools_missing", lambda: ["hostapd-mana", "dnsmasq"])
+    monkeypatch.setattr(wo, "_ap_tools_missing", lambda: ["airbase-ng", "dnsmasq"])
     r = client.post("/api/wifi_offensive/evil_twin", json={"ssid": IN_SSID})
     assert r.status_code == 503
-    assert "hostapd-mana" in r.text
+    assert "airbase-ng" in r.text
 
 
 def test_in_scope_evil_twin_submits_gated(client, monkeypatch):
@@ -487,10 +501,8 @@ def test_in_scope_evil_twin_submits_gated(client, monkeypatch):
         return "job-et"
 
     mon = AsyncMock(return_value="")
-    restore = AsyncMock(return_value="")
     monkeypatch.setattr(wo.runner, "submit", fake_submit)
     monkeypatch.setattr(wo, "_ensure_monitor", mon)
-    monkeypatch.setattr(wo, "_restore_managed", restore)
     monkeypatch.setattr(wo, "_ap_tools_missing", lambda: [])  # pretend tools present
 
     r = client.post("/api/wifi_offensive/evil_twin", json={"ssid": IN_SSID, "channel": 6})
@@ -501,15 +513,17 @@ def test_in_scope_evil_twin_submits_gated(client, monkeypatch):
     assert body["creds_log"]  # captured creds land in the engagement dir
     assert captured["type"] == "wifi.evil_twin"
     assert captured["kw"]["requires_engagement"] is True  # gate not bypassed
-    assert captured["kw"]["target"] == IN_SSID
-    assert "hostapd-mana" in captured["argv"][2]
+    assert captured["kw"]["target"] == IN_SSID            # full scope gate
+    assert "airbase-ng" in captured["argv"][2]
     assert "python3" in captured["argv"][2]  # captive portal in the launch script
-    restore.assert_awaited()      # managed-mode prep ran before AP start
-    mon.assert_not_awaited()      # AP mode must NEVER flip the radio to monitor
+    mon.assert_awaited()  # airbase-ng needs the mon0 monitor iface
 
 
-def test_in_scope_karma_submits_gated_without_portal(client, monkeypatch):
-    _engage(ssids=[IN_SSID])
+def test_in_scope_karma_submits_gated_without_target(client, monkeypatch):
+    # karma works under ANY active engagement — even one whose scope has no SSID
+    # entries — because it has no per-target check. But it still requires the
+    # engagement to be ON (proven by the engagement-off test above).
+    _engage(bssids=[IN_SCOPE])  # scope has a BSSID but no SSIDs at all
     import warlock.modules.wifi_offensive as wo
 
     captured: dict = {}
@@ -521,20 +535,19 @@ def test_in_scope_karma_submits_gated_without_portal(client, monkeypatch):
         return "job-ka"
 
     mon = AsyncMock(return_value="")
-    restore = AsyncMock(return_value="")
     monkeypatch.setattr(wo.runner, "submit", fake_submit)
     monkeypatch.setattr(wo, "_ensure_monitor", mon)
-    monkeypatch.setattr(wo, "_restore_managed", restore)
     monkeypatch.setattr(wo, "_ap_tools_missing", lambda: [])
 
-    r = client.post("/api/wifi_offensive/karma", json={"ssid": IN_SSID})
+    r = client.post("/api/wifi_offensive/karma", json={"channel": 1})
     assert r.status_code == 200, r.text
     assert captured["type"] == "wifi.karma"
-    assert captured["kw"]["target"] == IN_SSID
-    assert "hostapd-mana" in captured["argv"][2]
-    assert "python3" not in captured["argv"][2]  # karma serves no captive portal
-    restore.assert_awaited()
-    mon.assert_not_awaited()
+    assert captured["kw"]["requires_engagement"] is True  # gate not bypassed
+    assert captured["kw"]["target"] == ""                 # promiscuous: no scope target
+    assert "airbase-ng" in captured["argv"][2]
+    assert "-P" in captured["argv"][2]            # respond to all probes
+    assert "python3" not in captured["argv"][2]   # karma serves no captive portal
+    mon.assert_awaited()
 
 
 # --------------------------------------------------------------------------- #
