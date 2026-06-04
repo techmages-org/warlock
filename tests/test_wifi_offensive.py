@@ -280,6 +280,11 @@ def test_rogue_ap_command_evil_twin_full_lifecycle(tmp_path):
     assert "trap cleanup EXIT INT TERM" in script  # teardown wired
     assert "set type managed" in script  # restores wlan1 on exit
     assert "sleep 600" in script      # capture window honoured
+    # Self-kill safety: reap airbase by exact name + dnsmasq via a $$-excluding
+    # pgrep loop; NEVER a bare `pkill -f` (which would match this bash script).
+    assert "pkill -x airbase-ng" in script
+    assert 'pgrep -f' in script and '[ "$p" = "$$" ]' in script
+    assert "pkill -f" not in script
 
 
 def test_rogue_ap_command_karma_has_no_portal(tmp_path):
@@ -295,6 +300,65 @@ def test_rogue_ap_command_karma_has_no_portal(tmp_path):
     assert "python3" not in script    # karma never serves a captive portal
     assert "iptables" not in script   # no portal -> no redirect
     assert "set type managed" in script  # still restores the radio
+    assert "pkill -f" not in script   # self-kill safe
+
+
+def test_rogue_ap_teardown_runs_to_completion(tmp_path):
+    """Execute the launch script with every external tool shimmed and assert the
+    cleanup trap reaches the wlan1->managed restore — i.e. it does NOT SIGTERM
+    itself partway (the pkill-self-match bug). Converts the token-presence checks
+    into a behavioural guarantee that teardown finishes."""
+    import os
+    import shlex
+    import shutil
+    import subprocess
+
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("bash not available")
+
+    import warlock.modules.wifi_offensive as wo
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    iwlog = tmp_path / "iw.log"
+
+    # `sudo` shim: drop a leading -n, exec the rest (so `sudo -n iw ...` -> iw).
+    (bindir / "sudo").write_text(
+        '#!/bin/sh\n[ "$1" = "-n" ] && shift\nexec "$@"\n'
+    )
+    # `iw` shim records every call so we can prove the restore step ran.
+    (bindir / "iw").write_text(
+        f'#!/bin/sh\necho "iw $*" >> {shlex.quote(str(iwlog))}\nexit 0\n'
+    )
+    # Everything else is a no-op; pgrep "finds nothing" so the reap loops idle.
+    for name in ("ip", "iptables", "pkill", "sleep", "dnsmasq", "airbase-ng", "python3"):
+        (bindir / name).write_text("#!/bin/sh\nexit 0\n")
+    (bindir / "pgrep").write_text("#!/bin/sh\nexit 1\n")
+    for f in bindir.iterdir():
+        f.chmod(0o755)
+
+    # Point the airbase + dnsmasq paths at our shims so the in-script tool
+    # guards pass and the script proceeds to set the trap.
+    airbase_shim = str(bindir / "airbase-ng")
+    monkeypatch_dnsmasq = str(bindir / "dnsmasq")
+    orig_dnsmasq = wo.DNSMASQ
+    wo.DNSMASQ = monkeypatch_dnsmasq
+    try:
+        argv = wo._rogue_ap_command(
+            airbase_argv=[airbase_shim, "-e", "X", "mon0"],
+            dnsmasq_conf=tmp_path / "d.conf", portal_py=tmp_path / "p.py", duration=1,
+        )
+    finally:
+        wo.DNSMASQ = orig_dnsmasq
+
+    env = dict(os.environ, PATH=f"{bindir}:{os.environ.get('PATH', '')}")
+    subprocess.run([bash, "-c", argv[2]], env=env, timeout=30, check=False)
+
+    # The LAST thing cleanup does is restore the radio to managed; if the trap
+    # had killed itself earlier this line would never have run.
+    assert iwlog.exists(), "cleanup never reached the iw restore step"
+    assert "set type managed" in iwlog.read_text()
 
 
 def test_portal_script_is_valid_python(tmp_path):

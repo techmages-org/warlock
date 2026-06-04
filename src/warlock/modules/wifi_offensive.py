@@ -530,6 +530,16 @@ def _rogue_ap_command(
     exit — timeout, kill, or the engagement kill switch. Tool presence is
     re-checked in-script so a tool vanishing between pre-flight and launch still
     fails cleanly instead of half-starting the AP.
+
+    Self-kill safety: because the job runs as ``bash -c <script>``, the script
+    text (which contains the dnsmasq-conf / portal paths) is in this process's
+    own ``/proc/<pid>/cmdline``. A naive ``pkill -f <conf>`` in cleanup would
+    therefore match — and SIGTERM — the cleanup's own bash process before it
+    finishes, stranding wlan1 in monitor. We avoid that two ways: airbase-ng is
+    reaped by exact process *name* (``pkill -x``, which can never match
+    ``bash``), and dnsmasq / the portal are reaped via a ``pgrep -f`` loop that
+    explicitly skips this script's PID (``$$``). The radio restore therefore
+    always runs to completion.
     """
     duration = max(30, int(duration))
     q = shlex.quote
@@ -539,14 +549,23 @@ def _rogue_ap_command(
     dns = q(DNSMASQ)
     tapq, gw = q(tap), q(gateway)
 
+    # Reap a backgrounded child by a cmdline pattern WITHOUT matching this very
+    # script ($$). Kills the real child directly (not just the sudo wrapper),
+    # which sidesteps sudo's same-process-group signal-forwarding ambiguity.
+    def _reap(pattern: str) -> str:
+        return (
+            f"  for p in $(pgrep -f {pattern} 2>/dev/null); do "
+            f'[ "$p" = "$$" ] || sudo -n kill "$p" 2>/dev/null; done\n'
+        )
+
     portal_launch = ""
-    portal_kill = ""
+    portal_reap = ""
     iptables_add = ""
     iptables_del = ""
     if portal_py is not None:
         pp = q(str(portal_py))
-        portal_launch = f"sudo -n python3 {pp} & PORTAL=$!\n"
-        portal_kill = f"  sudo -n pkill -f {pp} 2>/dev/null\n"
+        portal_launch = f"sudo -n python3 {pp} &\n"
+        portal_reap = _reap(pp)
         redir = (
             f"-t nat {{op}} PREROUTING -i {tapq} -p tcp --dport 80 "
             f"-j DNAT --to-destination {gateway}:80"
@@ -564,9 +583,10 @@ def _rogue_ap_command(
         # Teardown trap: kill the AP stack, drop the redirect, restore wlan1.
         "cleanup() {\n"
         "  trap - EXIT INT TERM\n"
-        "  sudo -n kill $ABID 2>/dev/null\n"
-        f"  sudo -n pkill -f {dc} 2>/dev/null\n"
-        f"{portal_kill}"
+        # airbase-ng by exact name (never matches this 'bash' process).
+        "  sudo -n pkill -x airbase-ng 2>/dev/null\n"
+        f"{_reap(dc)}"          # dnsmasq, skipping $$
+        f"{portal_reap}"        # captive portal, skipping $$ (evil-twin only)
         f"{iptables_del}"
         f"  sudo -n ip addr flush dev {tapq} 2>/dev/null\n"
         # Restore the MT7921 to managed mode under its canonical name wlan1
@@ -589,11 +609,13 @@ def _rogue_ap_command(
         f"sudo -n ip addr add {gw}/24 dev {tapq} 2>/dev/null\n"
         f"sudo -n ip link set {tapq} up 2>/dev/null\n"
         # 4. DHCP + DNS catch-all for associated clients.
-        f"sudo -n {dns} -C {dc} -d & DNSID=$!\n"
+        f"sudo -n {dns} -C {dc} -d &\n"
         # 5. iptables :80 redirect + captive portal (evil-twin only).
         f"{iptables_add}"
         f"{portal_launch}"
         # 6. run for the capture window, then let the trap restore managed mode.
+        # Killing the airbase sudo wrapper makes 'wait' return; cleanup's
+        # pkill -x then reaps the (possibly orphaned) airbase-ng child.
         f"( sleep {duration}; sudo -n kill $ABID 2>/dev/null ) &\n"
         "wait $ABID\n"
     )
