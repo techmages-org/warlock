@@ -22,6 +22,7 @@ import os
 import shutil
 import signal
 import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,19 @@ STATE_PATH = Path("/run/warlock/airodump.state")
 MT_HELPER = "/usr/local/bin/wlan-mt7921"
 AIRODUMP = shutil.which("airodump-ng") or "/usr/sbin/airodump-ng"
 AIRCRACK = shutil.which("aircrack-ng") or "/usr/bin/aircrack-ng"
+
+# --- spin-guard knobs / state -------------------------------------------------
+# airodump-ng will peg a CPU core forever if its capture interface disappears:
+# the MT7921 USB dongle re-enumerates on regulatory ops, and warlock's own
+# monitor-cycle deletes wlan1 to create mon0. The watchdog below kills airodump
+# and backs off if the capture iface vanishes/goes down or its output stalls.
+_SYS_CLASS_NET = Path("/sys/class/net")
+IFF_UP = 0x1  # netdev flag bit for "interface administratively up"
+WATCHDOG_POLL_S = 3.0
+WATCHDOG_STALL_S = 15.0
+
+_watchdog_task: asyncio.Task | None = None
+_last_stop_reason: str | None = None
 
 
 def _captures_dir() -> Path:
@@ -99,6 +113,41 @@ def _clear_state() -> None:
             p.unlink()
         except FileNotFoundError:
             pass
+
+
+def _iface_exists(iface: str) -> bool:
+    return (_SYS_CLASS_NET / iface).exists()
+
+
+def _iface_is_up(iface: str) -> bool:
+    try:
+        flags = int((_SYS_CLASS_NET / iface / "flags").read_text().strip(), 16)
+    except (OSError, ValueError):
+        return False
+    return bool(flags & IFF_UP)
+
+
+def _iface_ready(iface: str) -> bool:
+    """True when the capture interface exists *and* is administratively up."""
+    return _iface_exists(iface) and _iface_is_up(iface)
+
+
+def _output_mtime(prefix: Path) -> float:
+    """Newest mtime across airodump's rolling CSV/pcap output for this prefix.
+
+    Returns 0.0 when nothing has been written yet. A value that stops advancing
+    means airodump is no longer capturing (interface gone, or wedged/spinning).
+    """
+    newest = 0.0
+    for pat in (f"{prefix.name}-*.csv", f"{prefix.name}-*.cap", f"{prefix.name}-*.pcap"):
+        for p in prefix.parent.glob(pat):
+            try:
+                m = p.stat().st_mtime
+            except OSError:
+                continue
+            if m > newest:
+                newest = m
+    return newest
 
 
 def _latest_csv(prefix: Path) -> Path | None:
@@ -293,6 +342,27 @@ async def _start_airodump(channels: str, iface: str | None) -> dict[str, Any]:
         raise HTTPException(500, "wlan-mt7921 monitor timeout") from e
 
     iface = iface or "mon0"
+
+    # Spin-guard (pre-launch): never spawn airodump against a missing/down capture
+    # interface — it would peg a CPU core forever on a dead capture handle. The
+    # helper above should have created mon0; if it isn't actually up, bail cleanly
+    # and return the radio to managed rather than launching a spinner.
+    if not _iface_ready(iface):
+        try:
+            res = await asyncio.create_subprocess_exec(
+                MT_HELPER, "managed",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(res.communicate(), timeout=10)
+        except Exception:  # noqa: BLE001
+            log.warning("wlan-mt7921 managed cleanup (iface not ready) failed")
+        raise HTTPException(
+            500,
+            f"capture interface {iface} is not up after monitor setup — "
+            "refusing to launch airodump (would spin)",
+        )
+
     stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
     prefix = _captures_dir() / f"airodump-{stamp}"
     argv: list[str] = [
@@ -333,11 +403,16 @@ async def _start_airodump(channels: str, iface: str | None) -> dict[str, Any]:
         "argv": argv,
     }
     _write_state(state)
+    _launch_watchdog(prefix, iface)
     log.info("airodump started pid=%s iface=%s prefix=%s", proc.pid, iface, prefix)
     return state
 
 
-async def _stop_airodump() -> dict[str, Any]:
+async def _teardown_airodump() -> dict[str, Any]:
+    """Kill airodump (if any), clear state, and return the radio to managed mode.
+
+    Safe to call repeatedly: a dead/absent pid and missing state are no-ops.
+    """
     st = _read_state()
     pid = st.get("pid")
     killed = False
@@ -376,6 +451,72 @@ async def _stop_airodump() -> dict[str, Any]:
         log.warning("wlan-mt7921 managed failed: %s", e)
 
     return {"ok": True, "killed": killed, "helper": helper_out.strip(), "prior_state": st}
+
+
+def _cancel_watchdog() -> None:
+    """Cancel the running watchdog task (no-op if none / if called from within it)."""
+    global _watchdog_task
+    task = _watchdog_task
+    _watchdog_task = None
+    if task is None or task.done():
+        return
+    try:
+        current = asyncio.current_task()
+    except RuntimeError:
+        current = None
+    if task is not current:
+        task.cancel()
+
+
+async def _stop_airodump() -> dict[str, Any]:
+    _cancel_watchdog()
+    return await _teardown_airodump()
+
+
+async def _watchdog(
+    prefix: Path,
+    iface: str,
+    *,
+    poll_s: float = WATCHDOG_POLL_S,
+    stall_s: float = WATCHDOG_STALL_S,
+) -> None:
+    """Spin-guard loop. While airodump runs, kill it and back off if the capture
+    interface disappears / goes down, or if capture output stops growing for
+    ``stall_s`` seconds. Never relaunches — re-arming requires an explicit start.
+    """
+    global _last_stop_reason
+    started = time.monotonic()
+    last_mtime = _output_mtime(prefix)
+    last_advance = started
+    while True:
+        await asyncio.sleep(poll_s)
+        if not _is_running():
+            return  # airodump exited (e.g. via /stop) — nothing to guard
+        reason: str | None = None
+        if not _iface_ready(iface):
+            reason = f"capture interface {iface} vanished or went down"
+        else:
+            mtime = _output_mtime(prefix)
+            now = time.monotonic()
+            if mtime > last_mtime:
+                last_mtime = mtime
+                last_advance = now
+            elif (now - last_advance) >= stall_s and (now - started) >= stall_s:
+                reason = f"capture output stalled for >{int(stall_s)}s"
+        if reason is not None:
+            log.warning("wifi_recon watchdog: %s — killing airodump and backing off", reason)
+            _last_stop_reason = reason
+            try:
+                await _teardown_airodump()
+            except Exception:  # noqa: BLE001
+                log.exception("wifi_recon watchdog teardown failed")
+            return
+
+
+def _launch_watchdog(prefix: Path, iface: str) -> None:
+    global _watchdog_task, _last_stop_reason
+    _last_stop_reason = None
+    _watchdog_task = asyncio.create_task(_watchdog(prefix, iface))
 
 
 class Module(ModuleBase):
@@ -423,6 +564,7 @@ class Module(ModuleBase):
                 "uptime_s": uptime,
                 "prefix": st.get("prefix"),
                 "started_at": st.get("started_at"),
+                "last_stop_reason": _last_stop_reason,
             }
 
         @r.post("/start")
