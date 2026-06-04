@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiGet, apiPost } from "../lib/api";
 import { BigValue, ModuleHeader, StatusLED, Tile } from "../components/hud";
+import { AdsbMap } from "../components/AdsbMap";
 
 type SdrStatus = {
   ok: boolean;
@@ -214,6 +215,7 @@ function AdsbTab({
   onStop: () => void;
 }) {
   const ok = adsb?.ok === true;
+  const aircraft = adsb?.aircraft ?? [];
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -237,6 +239,8 @@ function AdsbTab({
             : adsb?.reason ?? "readsb inactive"}
         </span>
       </div>
+
+      <AdsbMap aircraft={aircraft} active={ok} />
 
       <Tile title="AIRCRAFT" padded={false} led={ok ? "mint" : "amber"}>
         <div className="overflow-auto max-h-[560px]">
