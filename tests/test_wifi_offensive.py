@@ -298,6 +298,65 @@ def test_crack_rejects_path_traversal(client):
 
 
 # --------------------------------------------------------------------------- #
+# Teardown: wlan1 must never be left stranded as mon0
+# --------------------------------------------------------------------------- #
+def test_restore_managed_pins_wlan1_when_helper_strands_mon0(monkeypatch):
+    """If the shared helper returns 0 but leaves the card named mon0 (the known
+    bug), _restore_managed must rename it back to the canonical wlan1."""
+    import asyncio
+
+    import warlock.modules.wifi_offensive as wo
+
+    # Helper present; simulated state: still named mon0 after `managed` (the bug).
+    state = {"mon0": True, "wlan1": False}
+    calls: list[list[str]] = []
+
+    async def fake_sh(*argv, timeout=10.0):
+        calls.append(list(argv))
+        # Emulate the rename side effect: `ip link set mon0 name wlan1`.
+        if list(argv[:3]) == ["sudo", "-n", "ip"] and "name" in argv and argv[-1] == "wlan1":
+            state["mon0"] = False
+            state["wlan1"] = True
+        return 0, ""
+
+    monkeypatch.setattr(wo, "_have_helper", lambda: True)
+    monkeypatch.setattr(wo, "_iface_exists", lambda n: state.get(n, False))
+    monkeypatch.setattr(wo, "_sh", fake_sh)
+
+    out = asyncio.run(wo._restore_managed())
+    flat = [" ".join(c) for c in calls]
+    assert any("wlan-mt7921 managed" in f for f in flat)  # helper was tried first
+    assert any("iw dev mon0 set type managed" in f for f in flat)
+    assert any("ip link set mon0 name wlan1" in f for f in flat)  # canonical name pinned
+    assert state["wlan1"] is True and state["mon0"] is False
+    assert "wlan1" in out
+
+
+def test_restore_managed_trusts_helper_when_wlan1_restored(monkeypatch):
+    """If the helper correctly leaves wlan1 present and mon0 gone, no manual
+    rename is issued (we trust the fixed helper)."""
+    import asyncio
+
+    import warlock.modules.wifi_offensive as wo
+
+    state = {"mon0": False, "wlan1": True}
+    calls: list[list[str]] = []
+
+    async def fake_sh(*argv, timeout=10.0):
+        calls.append(list(argv))
+        return 0, "ok"
+
+    monkeypatch.setattr(wo, "_have_helper", lambda: True)
+    monkeypatch.setattr(wo, "_iface_exists", lambda n: state.get(n, False))
+    monkeypatch.setattr(wo, "_sh", fake_sh)
+
+    asyncio.run(wo._restore_managed())
+    flat = [" ".join(c) for c in calls]
+    assert flat == ["/usr/local/bin/wlan-mt7921 managed"] or flat[0].endswith("wlan-mt7921 managed")
+    assert not any("name wlan1" in f for f in flat)  # no manual rename needed
+
+
+# --------------------------------------------------------------------------- #
 # Deferred ops are stubbed (501) but the routes exist
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("op", ["evil_twin", "karma", "wps", "eaphammer"])
