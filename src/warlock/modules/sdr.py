@@ -330,11 +330,16 @@ class Module(ModuleBase):
                 return {"ok": False, "reason": e.detail, "aircraft": []}
             craft = data.get("aircraft") or []
             now_ts = data.get("now")
-            # Normalize the subset we care about.
+            # Pass through the full readsb aircraft.json field set per the ADS-B
+            # field contract (ORCHESTRATION.md). Additive: the original 9 fields
+            # keep their exact names so existing consumers (web Sdr page +
+            # AdsbMap) don't break. Every field is .get() — readsb omits any it
+            # can't decode, so all are optional and we never crash on absence.
             rows = []
             for a in craft:
                 rows.append(
                     {
+                        # --- original 9 (names unchanged) ---
                         "icao": a.get("hex"),
                         "callsign": (a.get("flight") or "").strip() or None,
                         "altitude_ft": a.get("alt_baro") or a.get("altitude"),
@@ -345,6 +350,47 @@ class Module(ModuleBase):
                         "rssi": a.get("rssi"),
                         "seen_s": a.get("seen"),
                         "squawk": a.get("squawk"),
+                        # --- identity / database ---
+                        "registration": a.get("r"),
+                        "type": a.get("t"),
+                        "type_desc": a.get("desc"),
+                        "operator": a.get("ownOp"),
+                        "db_flags": a.get("dbFlags"),
+                        "category": a.get("category"),
+                        # --- altitude / speed ---
+                        "alt_geom_ft": a.get("alt_geom"),
+                        "ias": a.get("ias"),
+                        "tas": a.get("tas"),
+                        "mach": a.get("mach"),
+                        # --- heading / attitude ---
+                        "mag_heading": a.get("mag_heading"),
+                        "true_heading": a.get("true_heading"),
+                        "roll": a.get("roll"),
+                        "track_rate": a.get("track_rate"),
+                        # --- vertical rate ---
+                        "vert_rate_fpm": a.get("baro_rate"),
+                        "geom_rate": a.get("geom_rate"),
+                        # --- emergency / FMS selections ---
+                        "emergency": a.get("emergency"),
+                        "sel_altitude_ft": a.get("nav_altitude_mcp"),
+                        "sel_heading": a.get("nav_heading"),
+                        "nav_qnh": a.get("nav_qnh"),
+                        "nav_modes": a.get("nav_modes"),
+                        # --- position integrity ---
+                        "nic": a.get("nic"),
+                        "rc": a.get("rc"),
+                        "nac_p": a.get("nac_p"),
+                        "nac_v": a.get("nac_v"),
+                        "sil": a.get("sil"),
+                        "sil_type": a.get("sil_type"),
+                        # --- signal ---
+                        "messages": a.get("messages"),
+                        "seen_pos_s": a.get("seen_pos"),
+                        # --- wind / temperature (derived, often absent) ---
+                        "wind_dir": a.get("wd"),
+                        "wind_speed": a.get("ws"),
+                        "oat": a.get("oat"),
+                        "tat": a.get("tat"),
                     }
                 )
             return {"ok": True, "now": now_ts, "count": len(rows), "aircraft": rows}

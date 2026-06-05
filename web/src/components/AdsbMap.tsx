@@ -5,7 +5,7 @@
 // Sdr poll loop (no extra fetch here). All Leaflet style overrides live in the
 // <style> block below so this stays self-contained.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import L from "leaflet";
 import { MapContainer, TileLayer, Marker, Popup, Circle } from "react-leaflet";
@@ -15,20 +15,234 @@ import { Tile } from "./hud";
 // Receiver site — Granger, TX. The map always centres here.
 export const RECEIVER = { lat: 30.7188, lon: -97.4436 } as const;
 
-// Subset of the SDR Aircraft shape the map needs (structurally compatible).
+// Full readsb aircraft intel shape (structurally compatible with the SDR page's
+// 9-field Aircraft type — every enriched field below is optional, so a plain
+// 9-field row stays assignable, and the runtime objects carry the extra props
+// the backend now passes through). readsb omits any field it can't decode, so
+// the card degrades to "—" gracefully for whatever's missing.
 export type MapAircraft = {
+  // --- original 9 ---
   icao: string;
   callsign: string | null;
-  altitude_ft: number | null;
+  altitude_ft: number | string | null; // "ground" when on the deck
   speed_kt: number | null;
   heading: number | null;
   lat: number | null;
   lon: number | null;
   seen_s: number | null;
   squawk: string | null;
+  // --- enriched (all optional) ---
+  rssi?: number | null;
+  registration?: string | null;
+  type?: string | null;
+  type_desc?: string | null;
+  operator?: string | null;
+  db_flags?: number | null;
+  category?: string | null;
+  alt_geom_ft?: number | string | null;
+  ias?: number | null;
+  tas?: number | null;
+  mach?: number | null;
+  mag_heading?: number | null;
+  true_heading?: number | null;
+  roll?: number | null;
+  track_rate?: number | null;
+  vert_rate_fpm?: number | null;
+  geom_rate?: number | null;
+  emergency?: string | null;
+  sel_altitude_ft?: number | null;
+  sel_heading?: number | null;
+  nav_qnh?: number | null;
+  nav_modes?: string[] | null;
+  nic?: number | null;
+  rc?: number | null;
+  nac_p?: number | null;
+  nac_v?: number | null;
+  sil?: number | null;
+  sil_type?: string | null;
+  messages?: number | null;
+  seen_pos_s?: number | null;
+  wind_dir?: number | null;
+  wind_speed?: number | null;
+  oat?: number | null;
+  tat?: number | null;
 };
 
 const NM = 1852; // metres per nautical mile — for range rings.
+
+// db_flags is a bitfield: 1=Military, 2=Interesting, 4=PIA (Privacy ICAO
+// Address), 8=LADD (Limiting Aircraft Data Displayed). Decode set bits to chips.
+const DB_FLAGS: ReadonlyArray<readonly [number, string]> = [
+  [1, "MIL"],
+  [2, "INTEREST"],
+  [4, "PIA"],
+  [8, "LADD"],
+];
+function dbFlagChips(flags: number | null | undefined): string[] {
+  if (!flags) return [];
+  return DB_FLAGS.filter(([bit]) => (flags & bit) !== 0).map(([, label]) => label);
+}
+
+const DASH = "—";
+
+// Format a numeric value with optional unit + fixed decimals; "—" when absent.
+// readsb sends alt_baro:"ground" for on-deck aircraft — pass strings through.
+function num(
+  v: number | string | null | undefined,
+  unit = "",
+  digits?: number,
+): string {
+  if (v == null) return DASH;
+  if (typeof v === "string") return v; // e.g. "ground"
+  if (Number.isNaN(v)) return DASH;
+  const n = digits != null ? v.toFixed(digits) : v.toLocaleString();
+  return unit ? `${n} ${unit}` : n;
+}
+
+// Great-circle distance (nm) from the Granger receiver to a position.
+function haversineNm(lat: number, lon: number): number {
+  const R = 6371000; // earth radius, metres
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(lat - RECEIVER.lat);
+  const dLon = toRad(lon - RECEIVER.lon);
+  const s =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(RECEIVER.lat)) * Math.cos(toRad(lat)) * Math.sin(dLon / 2) ** 2;
+  return (R * 2 * Math.atan2(Math.sqrt(s), Math.sqrt(1 - s))) / NM;
+}
+
+// Initial bearing (deg true) from the receiver to a position.
+function bearingDeg(lat: number, lon: number): number {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const toDeg = (r: number) => (r * 180) / Math.PI;
+  const p1 = toRad(RECEIVER.lat);
+  const p2 = toRad(lat);
+  const dl = toRad(lon - RECEIVER.lon);
+  const y = Math.sin(dl) * Math.cos(p2);
+  const x = Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl);
+  return (toDeg(Math.atan2(y, x)) + 360) % 360;
+}
+
+// One label:value pair inside a section grid.
+function Row({ k, v }: { k: string; v: ReactNode }) {
+  return (
+    <>
+      <span className="adsb-k">{k}</span>
+      <span className="adsb-v">{v}</span>
+    </>
+  );
+}
+
+// Full tar1090-parity intel card for a single aircraft, phosphor-HUD themed.
+function PlanePopup({ a }: { a: MapAircraft }) {
+  const hasPos = a.lat != null && a.lon != null;
+  const dist = hasPos ? haversineNm(a.lat as number, a.lon as number) : null;
+  const brg = hasPos ? bearingDeg(a.lat as number, a.lon as number) : null;
+  const chips = dbFlagChips(a.db_flags);
+  const modes = a.nav_modes && a.nav_modes.length ? a.nav_modes.join(" ") : null;
+  const hasFms =
+    a.sel_altitude_ft != null || a.sel_heading != null || a.nav_qnh != null || modes != null;
+  const hasWind =
+    a.wind_speed != null || a.wind_dir != null || a.oat != null || a.tat != null;
+  const integrity =
+    a.nic != null || a.rc != null || a.nac_p != null || a.nac_v != null || a.sil != null;
+
+  return (
+    <div className="adsb-pop adsb-card">
+      {/* Header: callsign + registration/type/operator + ICAO/squawk/flags */}
+      <div className="adsb-pop-h">{a.callsign?.trim() || a.registration || a.icao}</div>
+      <div className="adsb-pop-sub">
+        <b>{a.registration || DASH}</b>
+        {" · "}
+        {a.type || DASH}
+        {a.type_desc ? ` · ${a.type_desc}` : ""}
+      </div>
+      {a.operator ? <div className="adsb-pop-sub adsb-op">{a.operator}</div> : null}
+      <div className="adsb-pop-sub">
+        icao <b>{a.icao}</b>
+        {a.squawk ? ` · sq ${a.squawk}` : ""}
+        {a.category ? ` · cat ${a.category}` : ""}
+        {a.emergency && a.emergency !== "none" ? (
+          <span className="adsb-emrg"> · {a.emergency.toUpperCase()}</span>
+        ) : null}
+      </div>
+      <div className="adsb-chips">
+        {chips.length ? (
+          chips.map((c) => (
+            <span key={c} className="adsb-chip">
+              {c}
+            </span>
+          ))
+        ) : (
+          <span className="adsb-chip adsb-chip-off">DB: none</span>
+        )}
+      </div>
+
+      {/* SPATIAL */}
+      <div className="adsb-sec-h">SPATIAL</div>
+      <div className="adsb-grid">
+        <Row k="Ground spd" v={num(a.speed_kt, "kt")} />
+        <Row k="IAS / TAS" v={`${num(a.ias)} / ${num(a.tas, "kt")}`} />
+        <Row k="Mach" v={num(a.mach, "", 3)} />
+        <Row k="Baro alt" v={num(a.altitude_ft, "ft")} />
+        <Row k="WGS84 alt" v={num(a.alt_geom_ft, "ft")} />
+        <Row k="Vert rate" v={num(a.vert_rate_fpm, "fpm")} />
+        <Row k="Geom rate" v={num(a.geom_rate, "fpm")} />
+        <Row k="Track" v={num(a.heading, "°")} />
+        <Row k="Mag / True hdg" v={`${num(a.mag_heading)} / ${num(a.true_heading)}`} />
+        <Row k="Position" v={hasPos ? `${(a.lat as number).toFixed(4)}, ${(a.lon as number).toFixed(4)}` : DASH} />
+        <Row k="Distance" v={dist != null ? `${dist.toFixed(1)} nm` : DASH} />
+        <Row k="Bearing" v={brg != null ? `${brg.toFixed(0)}°` : DASH} />
+      </div>
+
+      {/* SIGNAL */}
+      <div className="adsb-sec-h">SIGNAL</div>
+      <div className="adsb-grid">
+        <Row k="RSSI" v={num(a.rssi, "dBFS", 1)} />
+        <Row k="Messages" v={num(a.messages)} />
+        <Row k="Last pos" v={a.seen_pos_s != null ? `${a.seen_pos_s.toFixed(1)} s` : DASH} />
+        <Row k="Last seen" v={a.seen_s != null ? `${a.seen_s.toFixed(1)} s` : DASH} />
+        {integrity ? (
+          <Row
+            k="NIC/Rc"
+            v={`${num(a.nic)} / ${a.rc != null ? `${a.rc} m` : DASH}`}
+          />
+        ) : null}
+        {integrity ? (
+          <Row
+            k="NACp/v · SIL"
+            v={`${num(a.nac_p)}/${num(a.nac_v)} · ${num(a.sil)}${a.sil_type ? ` (${a.sil_type})` : ""}`}
+          />
+        ) : null}
+      </div>
+
+      {/* FMS SEL — only when the aircraft is broadcasting selections */}
+      {hasFms ? (
+        <>
+          <div className="adsb-sec-h">FMS SEL</div>
+          <div className="adsb-grid">
+            <Row k="Sel alt" v={num(a.sel_altitude_ft, "ft")} />
+            <Row k="Sel head" v={num(a.sel_heading, "°")} />
+            <Row k="QNH" v={num(a.nav_qnh, "hPa", 1)} />
+            {modes ? <Row k="Modes" v={modes} /> : null}
+          </div>
+        </>
+      ) : null}
+
+      {/* WIND — derived, only when present */}
+      {hasWind ? (
+        <>
+          <div className="adsb-sec-h">WIND</div>
+          <div className="adsb-grid">
+            <Row k="Speed" v={num(a.wind_speed, "kt")} />
+            <Row k="Direction" v={num(a.wind_dir, "°")} />
+            <Row k="OAT / TAT" v={`${num(a.oat, "°C")} / ${num(a.tat, "°C")}`} />
+          </div>
+        </>
+      ) : null}
+    </div>
+  );
+}
 
 function esc(s: string): string {
   return s.replace(/[&<>"]/g, (c) =>
@@ -46,7 +260,12 @@ function planeIcon(a: MapAircraft): L.DivIcon {
   const hdg = a.heading ?? 0;
   const stale = (a.seen_s ?? 0) > 30;
   const call = a.callsign?.trim() || a.icao;
-  const alt = a.altitude_ft != null ? `${a.altitude_ft.toLocaleString()}ft` : "";
+  const alt =
+    a.altitude_ft == null
+      ? ""
+      : typeof a.altitude_ft === "number"
+        ? `${a.altitude_ft.toLocaleString()}ft`
+        : a.altitude_ft; // e.g. "ground"
   const label = alt ? `${call} · ${alt}` : call;
   return L.divIcon({
     className: "adsb-plane",
@@ -119,18 +338,7 @@ function MapView({ aircraft, fullscreen }: { aircraft: MapAircraft[]; fullscreen
       {aircraft.map((a) => (
         <Marker key={a.icao} position={[a.lat as number, a.lon as number]} icon={planeIcon(a)}>
           <Popup>
-            <div className="adsb-pop">
-              <div className="adsb-pop-h">{a.callsign?.trim() || a.icao}</div>
-              <div>icao <b>{a.icao}</b>{a.squawk ? ` · sq ${a.squawk}` : ""}</div>
-              <div>
-                alt {a.altitude_ft != null ? `${a.altitude_ft.toLocaleString()} ft` : "—"}
-                {" · "}gs {a.speed_kt != null ? `${a.speed_kt} kt` : "—"}
-              </div>
-              <div>
-                hdg {a.heading != null ? `${a.heading}°` : "—"}
-                {" · "}seen {a.seen_s != null ? `${a.seen_s}s` : "—"}
-              </div>
-            </div>
+            <PlanePopup a={a} />
           </Popup>
         </Marker>
       ))}
@@ -249,4 +457,26 @@ const MAP_CSS = `
 .leaflet-popup-content .adsb-pop b { color:#c4b5fd; font-weight:600; }
 .leaflet-container a.leaflet-popup-close-button { color:#4a5878; }
 .leaflet-container a.leaflet-popup-close-button:hover { color:#ffb347; }
+
+/* Full intel card — tar1090 parity, phosphor-HUD themed. */
+.leaflet-popup-content .adsb-card { min-width:236px; max-height:340px; overflow-y:auto; padding-right:2px; }
+.leaflet-popup-content .adsb-pop-sub { color:#9daecf; font-size:10.5px; line-height:1.45; }
+.leaflet-popup-content .adsb-pop-sub.adsb-op { color:#7c8bb0; font-style:italic; }
+.leaflet-popup-content .adsb-pop-sub b { color:#c4b5fd; }
+.leaflet-popup-content .adsb-emrg { color:#ff5a7a; font-weight:700; letter-spacing:.04em; }
+.leaflet-popup-content .adsb-chips { display:flex; flex-wrap:wrap; gap:3px; margin:4px 0 2px; }
+.leaflet-popup-content .adsb-chip {
+  font-size:9px; letter-spacing:.06em; font-weight:700; text-transform:uppercase;
+  color:#05070f; background:#ffb347; padding:0 4px; line-height:14px; border-radius:0;
+}
+.leaflet-popup-content .adsb-chip.adsb-chip-off { color:#4a5878; background:transparent; border:1px solid #1a2439; font-weight:500; }
+.leaflet-popup-content .adsb-sec-h {
+  color:#a78bfa; font-size:9.5px; font-weight:700; letter-spacing:.12em; text-transform:uppercase;
+  margin:7px 0 2px; padding-bottom:1px; border-bottom:1px solid #1a2439;
+}
+.leaflet-popup-content .adsb-grid {
+  display:grid; grid-template-columns:auto 1fr; gap:1px 10px; font-size:10.5px; line-height:1.5;
+}
+.leaflet-popup-content .adsb-k { color:#6b7a9c; white-space:nowrap; }
+.leaflet-popup-content .adsb-v { color:#cdd8ef; text-align:right; font-variant-numeric:tabular-nums; }
 `;
