@@ -22,6 +22,7 @@ TAB_ORDER: list[str] = [
     "esp32_companion",
     "ops",
     "system",
+    "audio",
 ]
 
 

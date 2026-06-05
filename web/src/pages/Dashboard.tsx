@@ -129,7 +129,7 @@ export function Dashboard() {
           />
           <div className="mt-2 text-txt-dim">
             {s.temp_c != null ? `${s.temp_c.toFixed(1)} °C` : "sensor offline"}
-            {s.throttled ? <span className="ml-2 text-pink-alert">{s.throttled}</span> : null}
+            {s.throttled ? <span className={`ml-2 ${s.throttled === "0x0" ? "text-mint-safe" : "text-pink-alert"}`}>{s.throttled}</span> : null}
           </div>
         </Tile>
 
@@ -141,7 +141,7 @@ export function Dashboard() {
         </Tile>
 
         <Tile title="DISK /" led={severityLed(diskSev)}>
-          <BigValue value={s.disk_root_mb_free} unit="MB free" color={diskSev === "err" ? "pink" : "amber"} flashOnChange />
+          <BigValue value={(s.disk_root_mb_free / 1024 / 1024).toFixed(2)} unit="TB free" color={diskSev === "err" ? "pink" : "amber"} flashOnChange />
           <div className="mt-2 text-txt-dim">
             {s.disk_root_percent}% used
           </div>
