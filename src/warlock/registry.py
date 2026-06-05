@@ -21,6 +21,8 @@ TAB_ORDER: list[str] = [
     "net_recon",
     "sdr_offensive",
     "esp32_companion",
+    "wireless_ids",
+    "server_audit",
     "ops",
     "system",
     "audio",
