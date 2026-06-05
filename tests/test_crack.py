@@ -389,6 +389,22 @@ def test_get_unknown_job_is_404(client):
     assert r.status_code == 404
 
 
+def test_submit_capture_routes_through_conversion(client, monkeypatch):
+    """The LOOT entry point (POST /api/crack/jobs with a .cap) resolves the raw
+    capture and routes it through conversion — the job's crack input is a .hc22000."""
+    _make_capture("loot.cap")
+    _make_wordlist()
+    _engage(bssids=[IN_SCOPE])
+    _install_convert_spawn(monkeypatch, produce=True)
+
+    r = client.post("/api/crack/jobs", json={"hashfile": "loot.cap", "target": IN_SCOPE})
+    assert r.status_code == 200, r.text
+    job = r.json()["job"]
+    assert job["converted"] is True
+    assert job["hashfile_name"] == "loot.cap"          # submitted the raw capture
+    assert job["crack_input_name"].endswith(".hc22000")  # hashcat reads the converted file
+
+
 # --------------------------------------------------------------------------- #
 # QUEUE lifecycle — driven directly via asyncio for deterministic assertions.
 # --------------------------------------------------------------------------- #
