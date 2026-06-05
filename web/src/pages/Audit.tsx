@@ -359,5 +359,3 @@ function JobsTable({ jobs, selected, onSelect }: {
     </Tile>
   );
 }
-
-export default Audit;
