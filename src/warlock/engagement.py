@@ -143,15 +143,48 @@ class EngagementMode:
         from warlock.jobs import runner
 
         cancelled = await runner.cancel_all()
+
+        # The shared runner only owns its OWN processes. The crack queue and the
+        # server_audit queue run their own managed async queues, so the emergency
+        # killswitch must reach into each directly or in-flight crack jobs and
+        # remote audits keep running. Imports are lazy (avoids a circular import:
+        # those modules import engagement for gating) and each module is guarded
+        # independently — a missing or broken module must NEVER break the
+        # killswitch or stop the other queues from being cancelled.
+        crack_cancelled = 0
+        try:
+            from warlock.modules import crack
+
+            crack_cancelled = await crack.queue.cancel_all()
+        except Exception as e:  # noqa: BLE001
+            log.warning("killswitch: crack queue cancel failed: %s", e)
+
+        audit_cancelled = 0
+        try:
+            from warlock.modules import server_audit
+
+            audit_cancelled = await server_audit.queue.cancel_all()
+        except Exception as e:  # noqa: BLE001
+            log.warning("killswitch: server_audit queue cancel failed: %s", e)
+
         restored = _restore_interfaces_to_managed()
 
         eid = self.engagement_id
         line = {
             "ts": datetime.utcnow().isoformat(),
             "cancelled_jobs": cancelled,
+            "crack_jobs_cancelled": crack_cancelled,
+            "audit_jobs_cancelled": audit_cancelled,
             "interfaces_restored": restored,
             "engagement_id": eid,
         }
+        log.info(
+            "killswitch: cancelled runner=%s crack=%s audit=%s; interfaces_restored=%s",
+            cancelled,
+            crack_cancelled,
+            audit_cancelled,
+            restored,
+        )
         # Log to engagement dir if engaged, else to the data root.
         settings = get_settings()
         if eid:
