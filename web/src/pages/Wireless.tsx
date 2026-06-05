@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { apiGet, apiPost } from "../lib/api";
 import { BigValue, ModuleHeader, SignalBars, StatusLED, Tile } from "../components/hud";
+import { Pager } from "../components/Pager";
 
 // ---------------------------------------------------------------------------
 // Guided "Wireless" workflow — WiFi-Pineapple-style single flow that unifies
@@ -909,16 +910,11 @@ function LootStep({
         </div>
       </Tile>
 
-      {/* Live activity feed — orchestrator wires <Pager/> here once it lands.
-          Placeholder kept so this page renders standalone (no Pager import yet). */}
+      {/* Live activity / loot feed — jobs, captures, and scope events stream
+          here during the flow. Embedded `bare` so it shares this tile's chrome
+          (Pager renders its own Tile otherwise). */}
       <Tile title="LIVE ACTIVITY" led="violet">
-        <div
-          data-pager-slot="wireless"
-          className="text-txt-dim text-[0.8125rem]"
-        >
-          Pager feed mounts here once the shared <code className="text-violet-bright">Pager</code> component
-          is available — jobs, captures, and scope events stream live during the flow.
-        </div>
+        <Pager bare className="max-h-72" />
       </Tile>
 
       <div className="text-txt-dim text-[0.75rem]">
