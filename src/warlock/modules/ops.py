@@ -8,9 +8,12 @@ history, audit, killswitch).
 """
 from __future__ import annotations
 
+import asyncio
 import html as html_lib
 import logging
 import re
+import threading
+from collections import deque
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -18,6 +21,7 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import desc
 
+from warlock import events
 from warlock.config import get_settings
 from warlock.db import session_scope
 from warlock.engagement import ScopeAllowlist, engagement, engagement_lock
@@ -25,6 +29,120 @@ from warlock.models import AuditEntry, Engagement, Job, Scan
 from warlock.modules._base import ModuleBase
 
 log = logging.getLogger("warlock.ops")
+
+
+# --------------------------------------------------------------------------- #
+# Live activity / loot feed ("the pager") — a subscriber drains the shared
+# ``ALERT_FIRED`` bus into a newest-first ring buffer that the web Pager polls
+# via ``GET /api/ops/events``. Bus events (IDS alerts, recon findings, scope
+# violations) are folded together with recent audit rows (gated-op activity) so
+# one feed shows both alerts and operator actions.
+#
+# Thread-safety: the subscriber task appends from the asyncio loop thread while
+# the sync ``/events`` handler reads from a threadpool thread, so the ring is
+# guarded by a ``threading.Lock`` — both ends touch the same singleton buffer.
+# --------------------------------------------------------------------------- #
+_FEED_MAX = 50
+
+
+class _EventRing:
+    """Bounded, thread-safe, newest-first activity buffer."""
+
+    def __init__(self, maxlen: int = _FEED_MAX) -> None:
+        self._buf: deque[dict[str, Any]] = deque(maxlen=maxlen)
+        self._lock = threading.Lock()
+
+    def push(self, item: dict[str, Any]) -> None:
+        with self._lock:
+            self._buf.append(item)
+
+    def snapshot(self) -> list[dict[str, Any]]:
+        """Return a newest-first copy of the buffered events."""
+        with self._lock:
+            return list(reversed(self._buf))
+
+    def clear(self) -> None:
+        with self._lock:
+            self._buf.clear()
+
+
+# Module-global singleton: the bus is a singleton, so the feed is too.
+_event_ring = _EventRing()
+
+
+def _norm_alert(evt: events.Event) -> dict[str, Any]:
+    """Normalise an ``ALERT_FIRED`` bus event into a feed row.
+
+    Publishers (net_recon, crack, jobs, server_audit) emit
+    ``{severity, source, message}``; we surface those plus the event ts.
+    """
+    p = evt.payload or {}
+    return {
+        "ts": evt.ts,
+        "source": str(p.get("source") or "system"),
+        "severity": str(p.get("severity") or "info"),
+        "kind": "alert",
+        "text": str(p.get("message") or evt.name),
+    }
+
+
+def _audit_to_event(a: AuditEntry) -> dict[str, Any]:
+    """Normalise a recent audit row into the same feed-row shape."""
+    kind = a.kind or "audit"
+    if a.outcome == "refused" or kind == "scope.violation":
+        severity = "warning"
+    else:
+        severity = "info"
+    parts = [p for p in (a.target, a.note) if p]
+    return {
+        "ts": a.ts.isoformat() if a.ts else None,
+        "source": "ops",
+        "severity": severity,
+        "kind": kind,
+        "text": " · ".join(str(p) for p in parts) or kind,
+    }
+
+
+def _record_alert(evt: events.Event) -> None:
+    """Push a single bus alert into the ring (best-effort)."""
+    try:
+        _event_ring.push(_norm_alert(evt))
+    except Exception:  # noqa: BLE001 — the feed must never break a publisher
+        log.exception("pager: failed to record alert event")
+
+
+async def _consume_bus() -> None:
+    """Long-lived subscriber: drain ``ALERT_FIRED`` events into the ring.
+
+    Resolves ``events.bus.subscribe`` at call time so tests can monkeypatch the
+    bus with a finite async generator.
+    """
+    async for evt in events.bus.subscribe():
+        if evt.name != events.ALERT_FIRED:
+            continue
+        _record_alert(evt)
+
+
+def _recent_audit_events(limit: int) -> list[dict[str, Any]]:
+    """Pull the most recent audit rows, normalised to feed rows."""
+    with session_scope() as s:
+        rows = (
+            s.query(AuditEntry)
+            .order_by(desc(AuditEntry.ts))
+            .limit(limit)
+            .all()
+        )
+        return [_audit_to_event(a) for a in rows]
+
+
+def _build_feed(limit: int, *, include_audit: bool) -> list[dict[str, Any]]:
+    """Merge bus alerts + (optional) audit rows, newest-first, capped to limit."""
+    feed = _event_ring.snapshot()
+    if include_audit:
+        feed = feed + _recent_audit_events(limit)
+    # ts values are naive UTC ISO strings → lexical sort == chronological sort.
+    feed.sort(key=lambda e: e.get("ts") or "", reverse=True)
+    return feed[:limit]
 
 
 class CreateEngagementBody(BaseModel):
@@ -566,6 +684,25 @@ class Module(ModuleBase):
     icon = "◆"
     requires_engagement = False
 
+    # Handle for the bus subscriber task; kept on the instance so re-creating
+    # the app (e.g. across test modules) doesn't orphan a prior task.
+    _bus_task: asyncio.Task[None] | None = None
+
+    async def on_startup(self) -> None:
+        """Start draining the alert bus into the activity-feed ring buffer."""
+        if self._bus_task is None or self._bus_task.done():
+            self._bus_task = asyncio.create_task(_consume_bus())
+
+    async def on_shutdown(self) -> None:
+        task = self._bus_task
+        self._bus_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+
     def router(self) -> APIRouter:
         r = APIRouter(prefix="/api/ops", tags=[self.id])
 
@@ -721,6 +858,17 @@ class Module(ModuleBase):
                     for a in rows
                 ]
             return {"ok": True, "audit": out, "count": len(out)}
+
+        @r.get("/events")
+        def ops_events(limit: int = 50, audit: int = 1) -> dict[str, Any]:
+            """Live activity/loot feed — recent bus alerts + gated-op activity.
+
+            Returns newest-first rows of ``{ts, source, severity, kind, text}``.
+            ``audit=0`` returns only the bus alert ring (no DB folding).
+            """
+            limit = max(1, min(_FEED_MAX, int(limit)))
+            feed = _build_feed(limit, include_audit=bool(audit))
+            return {"ok": True, "events": feed, "count": len(feed)}
 
         @r.get("/engagements/{engagement_id}/report")
         def engagement_report(engagement_id: str) -> dict[str, Any]:
