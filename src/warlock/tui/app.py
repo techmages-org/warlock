@@ -59,6 +59,10 @@ class WarlockApp(App):
         Binding("g,w", "goto('wifi_recon')", "WiFi Recon"),
         Binding("g,o", "goto('wifi_offensive')", "Offensive"),
         Binding("g,n", "goto('net_recon')", "Net Recon"),
+        Binding("g,c", "goto('crack')", "Crack"),
+        Binding("g,i", "goto('wireless_ids')", "Wireless IDS"),
+        Binding("g,a", "goto('server_audit')", "Server Audit"),
+        Binding("g,x", "goto('sdr_offensive')", "Offensive SDR"),
         Binding("g,e", "goto('ops')", "Engagements"),
         Binding("g,h", "goto('system')", "System"),
         Binding("ctrl+e", "toggle_engagement", "Toggle engagement"),
@@ -129,11 +133,29 @@ class WarlockApp(App):
             from warlock.tui.screens.system import SystemScreen
 
             return SystemScreen(api_url=self.api_url, auth=self.basic_auth)
+        if module_id == "wifi_offensive":
+            from warlock.tui.screens.wifi_offensive import WifiOffensiveScreen
+
+            return WifiOffensiveScreen(api_url=self.api_url, auth=self.basic_auth)
+        if module_id == "crack":
+            from warlock.tui.screens.crack import CrackScreen
+
+            return CrackScreen(api_url=self.api_url, auth=self.basic_auth)
+        if module_id == "wireless_ids":
+            from warlock.tui.screens.wireless_ids import WirelessIdsScreen
+
+            return WirelessIdsScreen(api_url=self.api_url, auth=self.basic_auth)
+        if module_id == "server_audit":
+            from warlock.tui.screens.server_audit import ServerAuditScreen
+
+            return ServerAuditScreen(api_url=self.api_url, auth=self.basic_auth)
+        if module_id == "sdr_offensive":
+            from warlock.tui.screens.sdr_offensive import SdrOffensiveScreen
+
+            return SdrOffensiveScreen(api_url=self.api_url, auth=self.basic_auth)
         from warlock.tui.screens.stub import StubScreen
 
         labels = {
-            "wifi_offensive": "Offensive WiFi",
-            "sdr_offensive": "Offensive SDR",
             "esp32_companion": "ESP32 Companion",
         }
         return StubScreen(module_id=module_id, label=labels.get(module_id, module_id.title()))
@@ -172,7 +194,9 @@ class WarlockApp(App):
     def action_help(self) -> None:
         self.notify(
             "g+d dashboard • g+m mesh • g+g gps • g+s sdr • g+w wifi-recon • "
-            "g+o offensive • g+n net-recon • g+e ops • g+h system • Ctrl+K kill • q quit",
+            "g+o offensive • g+n net-recon • g+c crack • g+i wireless-ids • "
+            "g+a server-audit • g+x sdr-offensive • g+e ops • g+h system • "
+            "Ctrl+K kill • q quit",
         )
 
 

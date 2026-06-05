@@ -15,6 +15,11 @@ class Module(ModuleBase):
     icon = "☢"
     requires_engagement = True
 
+    def tui_screen(self):  # type: ignore[no-untyped-def]
+        from warlock.tui.screens.sdr_offensive import SdrOffensiveScreen
+
+        return SdrOffensiveScreen()
+
     def router(self) -> APIRouter:
         r = APIRouter(prefix=f"/api/{self.id}", tags=[self.id])
 

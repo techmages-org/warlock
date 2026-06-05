@@ -636,6 +636,11 @@ class Module(ModuleBase):
                 log.exception("wireless_ids shutdown stop failed")
         self._published_alerts.clear()
 
+    def tui_screen(self):  # type: ignore[no-untyped-def]
+        from warlock.tui.screens.wireless_ids import WirelessIdsScreen
+
+        return WirelessIdsScreen()
+
     def router(self) -> APIRouter:
         r = APIRouter(prefix="/api/wireless_ids", tags=[self.id])
 

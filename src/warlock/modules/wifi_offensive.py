@@ -868,6 +868,11 @@ class Module(ModuleBase):
     requires_engagement = True
     requires_root = True
 
+    def tui_screen(self):  # type: ignore[no-untyped-def]
+        from warlock.tui.screens.wifi_offensive import WifiOffensiveScreen
+
+        return WifiOffensiveScreen()
+
     async def on_shutdown(self) -> None:
         try:
             await _restore_managed()

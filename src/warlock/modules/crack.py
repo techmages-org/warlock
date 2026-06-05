@@ -721,6 +721,11 @@ class Module(ModuleBase):
     requires_engagement = True   # mirrors the inline /crack gate (nav shows the "!")
     requires_root = False        # offline — no sudo, never touches the radio
 
+    def tui_screen(self):  # type: ignore[no-untyped-def]
+        from warlock.tui.screens.crack import CrackScreen
+
+        return CrackScreen()
+
     async def on_shutdown(self) -> None:
         # The engagement kill switch only reaches runner-owned procs; cancel our
         # in-flight jobs here so a clean server stop never strands a hashcat run.

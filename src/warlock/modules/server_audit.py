@@ -835,6 +835,11 @@ class Module(ModuleBase):
     requires_engagement = True
     requires_root = False
 
+    def tui_screen(self):  # type: ignore[no-untyped-def]
+        from warlock.tui.screens.server_audit import ServerAuditScreen
+
+        return ServerAuditScreen()
+
     async def on_shutdown(self) -> None:
         try:
             await queue.cancel_all()
