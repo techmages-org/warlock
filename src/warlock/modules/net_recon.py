@@ -1,4 +1,4 @@
-"""Net Recon — LAN host discovery + nmap-driven port scans.
+"""Net Recon — LAN host discovery + nmap-driven port scans + blue-team monitoring.
 
 Backend exposes:
   GET    /api/net_recon/status          — current LAN summary
@@ -10,25 +10,36 @@ Backend exposes:
   GET    /api/net_recon/scan/{id}       — full scan record
   DELETE /api/net_recon/scan/{id}       — remove a scan record
 
+Blue-team / defensive monitoring (passive — your own network, no engagement gate):
+  POST   /api/net_recon/baseline        — snapshot current hosts/services as the "known-good" baseline
+  GET    /api/net_recon/baseline        — return the stored baseline snapshot
+  POST   /api/net_recon/diff            — scan + diff vs baseline → new/changed/gone alerts
+  GET    /api/net_recon/alerts          — the findings from the most recent diff
+
 Discovery uses ``nmap -sn -PR`` (ARP-based) so it does not depend on the
 optional ``arp-scan`` package. Port scan profiles invoke ``nmap -oX -`` and
-parse the XML inline.
+parse the XML inline. The baseline + diff persist as JSON files under the
+operator data root (``~/warlock/``) so no new DB model is required.
 """
 from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 import logging
 import shutil
 import subprocess
 import xml.etree.ElementTree as ET
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import desc
 
+from warlock import events
+from warlock.config import get_settings
 from warlock.db import session_scope
 from warlock.engagement import engagement
 from warlock.models import Host, Scan
@@ -228,6 +239,210 @@ class PortScanBody(BaseModel):
     profile: str = Field(default="quick")
 
 
+class DefenseBody(BaseModel):
+    """Body for baseline/diff. ``profile`` None → host-discovery sweep (``-sn -PR``);
+    a PROFILES key → port-aware scan so new/gone *services* can be diffed too."""
+    profile: str | None = Field(default=None)
+
+
+# --------------------------------------------------------------------------- #
+# Blue-team defensive monitoring: baseline snapshot + scan-diff alerting.
+#
+# A *snapshot* is built directly from one nmap run's parsed hosts. The baseline
+# and the diff's "current" picture are built the SAME way, so new/gone hosts and
+# new/gone services diff cleanly (symmetric). Both persist as JSON under the
+# operator data root — no new DB model, no engagement gate (own-network monitoring
+# mirrors the read-only arpscan route).
+# --------------------------------------------------------------------------- #
+def _baseline_path() -> Path:
+    return get_settings().data / "net_recon_baseline.json"
+
+
+def _alerts_path() -> Path:
+    return get_settings().data / "net_recon_alerts.json"
+
+
+def _save_json(path: Path, obj: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(obj, indent=2), encoding="utf-8")
+
+
+def _load_json(path: Path) -> dict[str, Any] | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError, OSError):
+        return None
+
+
+def _build_snapshot(hosts: list[dict[str, Any]], *, subnet: str | None, profile: str | None) -> dict[str, Any]:
+    """Turn parsed nmap hosts into a baseline/diff snapshot keyed by IP.
+
+    ``host_discovery_only`` records whether this scan had port visibility — an
+    ARP sweep (profile None) sees no services, so service-level diffs must be
+    skipped against it (absence of port data is NOT "service gone")."""
+    host_map: dict[str, Any] = {}
+    svc_count = 0
+    for h in hosts:
+        ip = h.get("ip") or ""
+        if not ip:
+            continue
+        svcs = [{
+            "port": int(p.get("port", 0) or 0),
+            "proto": p.get("proto", "tcp"),
+            "service": p.get("service", ""),
+            "product": p.get("product", ""),
+            "version": p.get("version", ""),
+        } for p in h.get("ports", [])]
+        svc_count += len(svcs)
+        host_map[ip] = {
+            "ip": ip,
+            "mac": (h.get("mac") or "").lower(),
+            "vendor": h.get("vendor", ""),
+            "hostname": h.get("hostname", ""),
+            "os_guess": h.get("os_guess", ""),
+            "services": svcs,
+        }
+    return {
+        "created_at": datetime.utcnow().isoformat(),
+        "subnet": subnet,
+        "profile": profile or "arpscan",
+        "host_discovery_only": profile is None,
+        "host_count": len(host_map),
+        "service_count": svc_count,
+        "hosts": host_map,
+    }
+
+
+def _baseline_meta(snap: dict[str, Any]) -> dict[str, Any]:
+    """Lightweight baseline summary (everything except the full host map)."""
+    return {
+        "created_at": snap.get("created_at"),
+        "subnet": snap.get("subnet"),
+        "profile": snap.get("profile"),
+        "host_discovery_only": snap.get("host_discovery_only", True),
+        "host_count": snap.get("host_count", len(snap.get("hosts", {}) or {})),
+        "service_count": snap.get("service_count", 0),
+    }
+
+
+def _diff_snapshots(baseline: dict[str, Any], current: dict[str, Any]) -> list[dict[str, Any]]:
+    """Pure diff: baseline vs current snapshot → list of alert findings.
+
+    Findings: new_host / gone_host (host presence), new_service / gone_service
+    (open-port surface, only when BOTH scans had port visibility), and
+    mac_changed (same IP, different MAC → possible ARP spoof / device swap)."""
+    alerts: list[dict[str, Any]] = []
+    b_hosts: dict[str, Any] = baseline.get("hosts", {}) or {}
+    c_hosts: dict[str, Any] = current.get("hosts", {}) or {}
+    b_ips, c_ips = set(b_hosts), set(c_hosts)
+    service_capable = (
+        not baseline.get("host_discovery_only", True)
+        and not current.get("host_discovery_only", True)
+    )
+
+    # New devices on the network — the headline blue-team signal.
+    for ip in sorted(c_ips - b_ips):
+        h = c_hosts[ip]
+        vendor = h.get("vendor") or ""
+        hostname = h.get("hostname") or ""
+        label = f" ({vendor})" if vendor else (f" ({hostname})" if hostname else "")
+        alerts.append({
+            "type": "new_host", "severity": "warning", "ip": ip,
+            "mac": h.get("mac", ""), "vendor": vendor, "hostname": hostname,
+            "message": f"New device {ip}{label} appeared on the network",
+        })
+
+    # Devices from baseline that no longer respond.
+    for ip in sorted(b_ips - c_ips):
+        h = b_hosts[ip]
+        alerts.append({
+            "type": "gone_host", "severity": "info", "ip": ip,
+            "mac": h.get("mac", ""), "vendor": h.get("vendor", ""), "hostname": h.get("hostname", ""),
+            "message": f"Device {ip} from baseline is no longer responding",
+        })
+
+    # Hosts present in both: MAC changes + service-surface changes.
+    for ip in sorted(b_ips & c_ips):
+        bh, ch = b_hosts[ip], c_hosts[ip]
+        b_mac = (bh.get("mac") or "").lower()
+        c_mac = (ch.get("mac") or "").lower()
+        if b_mac and c_mac and b_mac != c_mac:
+            alerts.append({
+                "type": "mac_changed", "severity": "critical", "ip": ip,
+                "mac": c_mac, "old_mac": b_mac, "hostname": ch.get("hostname", ""),
+                "message": f"MAC for {ip} changed {b_mac} → {c_mac} (possible ARP spoofing / device swap)",
+            })
+        if not service_capable:
+            continue
+        b_svc = {(s["port"], s.get("proto", "tcp")): s for s in bh.get("services", [])}
+        c_svc = {(s["port"], s.get("proto", "tcp")): s for s in ch.get("services", [])}
+        for key in sorted(c_svc.keys() - b_svc.keys()):
+            s = c_svc[key]
+            name = s.get("service") or "?"
+            alerts.append({
+                "type": "new_service", "severity": "warning", "ip": ip,
+                "port": s["port"], "proto": s.get("proto", "tcp"), "service": s.get("service", ""),
+                "message": f"New open service {s['port']}/{s.get('proto', 'tcp')} ({name}) on {ip}",
+            })
+        for key in sorted(b_svc.keys() - c_svc.keys()):
+            s = b_svc[key]
+            name = s.get("service") or "?"
+            alerts.append({
+                "type": "gone_service", "severity": "info", "ip": ip,
+                "port": s["port"], "proto": s.get("proto", "tcp"), "service": s.get("service", ""),
+                "message": f"Service {s['port']}/{s.get('proto', 'tcp')} ({name}) on {ip} no longer open",
+            })
+    return alerts
+
+
+def _alert_summary(alerts: list[dict[str, Any]]) -> dict[str, int]:
+    out = {"new_host": 0, "gone_host": 0, "new_service": 0, "gone_service": 0, "mac_changed": 0}
+    for a in alerts:
+        t = a.get("type", "")
+        if t in out:
+            out[t] += 1
+    out["total"] = len(alerts)
+    return out
+
+
+async def _scan_for_snapshot(subnet: str, profile: str | None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Run the snapshot scan: ARP sweep (profile None) or a port-aware profile."""
+    if profile:
+        argv = PROFILES[profile] + [subnet]
+        timeout = 3600.0
+    else:
+        argv = ["-sn", "-PR", subnet]
+        timeout = 120.0
+    xml_text = await _run_nmap(argv, timeout=timeout)
+    hosts, summary = _parse_nmap_xml(xml_text)
+    return hosts, summary
+
+
+def _record_defense_scan(target: str, profile: str, summary: dict[str, Any]) -> None:
+    """Persist a Scan-history row for a baseline/diff sweep (audit visibility)."""
+    with session_scope() as s:
+        s.add(Scan(
+            target=target, profile=profile, status="success",
+            started_at=datetime.utcnow(), finished_at=datetime.utcnow(),
+            hosts_found=summary.get("up", 0), summary=summary, raw_xml="",
+            engagement_id=engagement.engagement_id,
+        ))
+
+
+async def _publish_alerts(alerts: list[dict[str, Any]]) -> None:
+    """Best-effort: fan noteworthy findings into the system-wide alert bus."""
+    for a in alerts:
+        if a.get("severity") not in ("warning", "critical"):
+            continue
+        try:
+            await events.bus.publish(
+                events.ALERT_FIRED,
+                {"severity": a["severity"], "source": "net_recon", "message": a["message"]},
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+
 class Module(ModuleBase):
     id = "net_recon"
     label = "Net Recon"
@@ -408,6 +623,73 @@ class Module(ModuleBase):
                     raise HTTPException(404, "scan not found")
                 s.delete(row)
             return {"ok": True, "deleted": scan_id}
+
+        # ------------------------------------------------------------------ #
+        # Blue-team defensive monitoring
+        # ------------------------------------------------------------------ #
+        @r.post("/baseline")
+        async def set_baseline(body: DefenseBody | None = None) -> dict[str, Any]:
+            """Snapshot current hosts/services on the local subnet as the baseline."""
+            profile = body.profile if body else None
+            if profile is not None and profile not in PROFILES:
+                raise HTTPException(400, f"unknown profile {profile!r}; choose one of {list(PROFILES)} or omit for host-discovery")
+            subnet, _gw = _primary_iface_subnet()
+            if not subnet:
+                raise HTTPException(503, "could not determine local subnet")
+            hosts, summary = await _scan_for_snapshot(subnet, profile)
+            _upsert_hosts(hosts)
+            snap = _build_snapshot(hosts, subnet=subnet, profile=profile)
+            _save_json(_baseline_path(), snap)
+            _record_defense_scan(subnet, "baseline", summary)
+            return {"ok": True, "baseline": _baseline_meta(snap)}
+
+        @r.get("/baseline")
+        def get_baseline() -> dict[str, Any]:
+            snap = _load_json(_baseline_path())
+            if not snap:
+                return {"ok": True, "baseline": None, "hosts": []}
+            return {
+                "ok": True,
+                "baseline": _baseline_meta(snap),
+                "hosts": list((snap.get("hosts") or {}).values()),
+            }
+
+        @r.post("/diff")
+        async def run_diff(body: DefenseBody | None = None) -> dict[str, Any]:
+            """Scan the local subnet and diff vs the saved baseline → alerts."""
+            baseline = _load_json(_baseline_path())
+            if not baseline:
+                raise HTTPException(409, "no baseline set — POST /api/net_recon/baseline first")
+            profile = body.profile if body else None
+            if profile is not None and profile not in PROFILES:
+                raise HTTPException(400, f"unknown profile {profile!r}; choose one of {list(PROFILES)} or omit for host-discovery")
+            subnet, _gw = _primary_iface_subnet()
+            if not subnet:
+                raise HTTPException(503, "could not determine local subnet")
+            hosts, summary = await _scan_for_snapshot(subnet, profile)
+            _upsert_hosts(hosts)
+            current = _build_snapshot(hosts, subnet=subnet, profile=profile)
+            alerts = _diff_snapshots(baseline, current)
+            result = {
+                "generated_at": datetime.utcnow().isoformat(),
+                "baseline_at": baseline.get("created_at"),
+                "subnet": subnet,
+                "profile": current["profile"],
+                "host_count": current["host_count"],
+                "summary": _alert_summary(alerts),
+                "alerts": alerts,
+            }
+            _save_json(_alerts_path(), result)
+            _record_defense_scan(subnet, "diff", summary)
+            await _publish_alerts(alerts)
+            return {"ok": True, **result}
+
+        @r.get("/alerts")
+        def get_alerts() -> dict[str, Any]:
+            result = _load_json(_alerts_path())
+            if not result:
+                return {"ok": True, "alerts": [], "summary": _alert_summary([]), "generated_at": None}
+            return {"ok": True, **result}
 
         return r
 
