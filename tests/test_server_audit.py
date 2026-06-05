@@ -99,16 +99,17 @@ def _count(kind: str, target: str) -> int:
 # Fake subprocess — no real audit tools.
 # --------------------------------------------------------------------------- #
 class FakeProc:
-    """Minimal asyncio.subprocess.Process stand-in (stderr folded into stdout)."""
+    """Minimal asyncio.subprocess.Process stand-in (separate stdout/stderr)."""
 
-    def __init__(self, output: bytes, rc: int = 0) -> None:
+    def __init__(self, output: bytes, rc: int = 0, err: bytes = b"") -> None:
         self._output = output
         self._rc = rc
+        self._err = err
         self.returncode = None
 
     async def communicate(self):
         self.returncode = self._rc
-        return self._output, None
+        return self._output, self._err
 
     def kill(self) -> None:
         self.returncode = -9
@@ -117,13 +118,13 @@ class FakeProc:
         self.returncode = -15
 
 
-def _install_fake_spawn(monkeypatch, output: bytes, rc: int = 0):
+def _install_fake_spawn(monkeypatch, output: bytes, rc: int = 0, err: bytes = b""):
     """Mock the subprocess spawn AND force tool-presence True, so the suite is
     deterministic on a dev box that may not have nmap/nikto/lynis installed."""
     import warlock.modules.server_audit as sa
 
     async def fake_spawn(argv):
-        return FakeProc(output, rc)
+        return FakeProc(output, rc, err)
 
     monkeypatch.setattr(sa, "_spawn", fake_spawn)
     monkeypatch.setattr(sa, "_tool_present", lambda path: True)
@@ -234,7 +235,8 @@ def test_nikto_argv():
     assert "sudo" not in argv
     assert argv[0].endswith("nikto")
     assert argv[argv.index("-h") + 1] == "http://10.10.0.5/"
-    assert argv[argv.index("-output") + 1] == "-"
+    assert argv[argv.index("-ask") + 1] == "no"
+    assert "-nointeractive" in argv
 
 
 def test_lynis_argv(tmp_path):
@@ -446,7 +448,11 @@ def test_lifecycle_ssh_connect_failure(monkeypatch):
     from warlock.modules import server_audit as sa
 
     _engage(ip_ranges=[SCOPE_CIDR])
-    _install_fake_spawn(monkeypatch, b"ssh: connect to host 10.10.0.5 port 22: Connection refused\n", rc=255)
+    # The refusal message lands on STDERR (empty stdout) — sourced into job.error.
+    _install_fake_spawn(
+        monkeypatch, b"", rc=255,
+        err=b"ssh: connect to host 10.10.0.5 port 22: Connection refused\n",
+    )
 
     async def scenario():
         q = sa.AuditQueue()

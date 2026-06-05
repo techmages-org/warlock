@@ -181,8 +181,12 @@ def _nmap_vuln_argv(target: str) -> list[str]:
 
 
 def _nikto_argv(url: str) -> list[str]:
-    """``nikto -h <url> ...`` — text findings (``+ `` lines) on stdout."""
-    return [NIKTO, "-h", url, "-ask", "no", "-nointeractive", "-Format", "txt", "-output", "-"]
+    """``nikto -h <url> ...`` — text findings (``+ `` lines) on stdout.
+
+    No ``-Format/-output`` — nikto prints its report to stdout by default, and
+    some builds reject ``-output -``; we parse the default console output.
+    """
+    return [NIKTO, "-h", url, "-ask", "no", "-nointeractive"]
 
 
 def _lynis_argv(report_file: Path) -> list[str]:
@@ -576,12 +580,16 @@ async def _gate(*, remote: bool, command: str, target: str, scope_target: str, n
 
 # --------------------------------------------------------------------------- #
 # Subprocess spawn — indirected so tests can mock it (no real tools run).
+# stdout and stderr are kept SEPARATE: nmap writes its ``-oX -`` XML document to
+# stdout while NSE/scan warnings go to stderr — folding them would corrupt the
+# XML (ET.fromstring would choke). Every parser reads stdout only; ssh failure
+# detail is sourced from stderr. (Mirrors net_recon._run_nmap.)
 # --------------------------------------------------------------------------- #
 async def _spawn(argv: list[str]) -> asyncio.subprocess.Process:
     return await asyncio.create_subprocess_exec(
         *argv,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
+        stderr=asyncio.subprocess.PIPE,
         stdin=asyncio.subprocess.DEVNULL,
     )
 
@@ -711,7 +719,7 @@ class AuditQueue:
                 job.proc = proc
                 timeout = TIMEOUTS.get(job.audit_type, 600.0)
                 try:
-                    out_b, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+                    out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
                 except asyncio.TimeoutError:
                     with contextlib.suppress(ProcessLookupError):
                         proc.kill()
@@ -720,8 +728,10 @@ class AuditQueue:
                     return
                 job.returncode = proc.returncode
                 text = (out_b or b"").decode("utf-8", errors="replace")
-                job.tail = text.splitlines()[-TAIL_LINES:]
-                self._finalize(job, text)
+                errtext = (err_b or b"").decode("utf-8", errors="replace")
+                tail_src = text + (f"\n--- stderr ---\n{errtext}" if errtext.strip() else "")
+                job.tail = tail_src.splitlines()[-TAIL_LINES:]
+                self._finalize(job, text, errtext)
         except asyncio.CancelledError:
             job.status = "cancelled"
             await self._terminate(job)
@@ -734,7 +744,7 @@ class AuditQueue:
                 job.finished_at = _now_iso()
             await events.bus.publish(events.JOB_FINISHED, {"job_id": job.id, "status": job.status})
 
-    def _finalize(self, job: AuditJob, text: str) -> None:
+    def _finalize(self, job: AuditJob, text: str, errtext: str = "") -> None:
         if job.cancelled or job.status == "cancelled":
             job.status = "cancelled"
             return
@@ -750,9 +760,11 @@ class AuditQueue:
                 pass
 
         # ssh-config: a missing begin-marker means the connection/auth failed.
+        # The failure detail (e.g. "Connection refused") lands on stderr.
         if job.audit_type == "ssh-config" and _SSH_BEGIN not in text:
             job.status = "failed"
-            job.error = (text.strip()[-400:] or "ssh audit failed (no output / connection refused)")
+            job.error = ((errtext or text).strip()[-400:]
+                         or "ssh audit failed (no output / connection refused)")
             return
 
         parser = _PARSERS[job.audit_type]
