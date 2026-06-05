@@ -40,3 +40,4 @@ secrets.yaml
 # Local ops docs (build playbooks, handoffs, orchestration logs) — contain creds, never push
 ops/
 HANDOFF.md
+ORCHESTRATION.md
