@@ -108,6 +108,17 @@ def _make_wordlist() -> Path:
     return p
 
 
+def _make_capture(name: str = "handshake.cap") -> Path:
+    """A raw airodump-style capture under captures/wifi (bytes, not a hashline)."""
+    from warlock.config import get_settings
+
+    cap = get_settings().data / "captures" / "wifi"
+    cap.mkdir(parents=True, exist_ok=True)
+    p = cap / name
+    p.write_bytes(b"\xd4\xc3\xb2\xa1 fake pcap bytes")
+    return p
+
+
 # --------------------------------------------------------------------------- #
 # Fake subprocesses — no real hashcat.
 # --------------------------------------------------------------------------- #
@@ -186,6 +197,57 @@ def _install_fake_spawn(monkeypatch, *, rc, crack, secret="hunter2", status_obj=
     monkeypatch.setattr(crack_mod, "_spawn", fake_spawn)
 
 
+class FakeConvertProc:
+    """hcxpcapngtool stand-in. When ``produce`` is True it writes a non-empty
+    .hc22000 hashline to the ``-o`` outfile (a usable handshake was present);
+    when False it writes nothing (no crackable handshake in the capture)."""
+
+    def __init__(self, argv, *, produce, rc) -> None:
+        self.argv = argv
+        self.returncode = None
+        self._produce = produce
+        self._rc = rc
+        self.stdout = _FakeStdout([b"hcxpcapngtool 6.x reading capture\n"])
+
+    async def wait(self) -> int:
+        if self._produce:
+            try:
+                out = self.argv[self.argv.index("-o") + 1]
+                Path(out).parent.mkdir(parents=True, exist_ok=True)
+                Path(out).write_text("WPA*02*converted*from*capture\n")
+            except (ValueError, IndexError, OSError):
+                pass
+        self.returncode = self._rc
+        return self._rc
+
+    def terminate(self) -> None:
+        self.returncode = -15
+
+
+def _install_convert_spawn(monkeypatch, *, produce, crack_rc=0, secret="hunter2"):
+    """Dispatch _spawn by tool: hcxpcapngtool -> FakeConvertProc (optionally
+    producing a hashfile), hashcat -> the cracking FakeProc. ``crack_spawned``
+    (a list) records every hashcat argv so a test can assert it never ran."""
+    import warlock.modules.crack as crack_mod
+
+    crack_obj = {
+        "status": 6,
+        "progress": [14344, 14344],
+        "recovered_total": [1, 1],
+        "devices": [{"speed": 123456}],
+    }
+    crack_spawned: list[list[str]] = []
+
+    async def fake_spawn(argv):
+        if argv and argv[0].endswith("hcxpcapngtool"):
+            return FakeConvertProc(argv, produce=produce, rc=0 if produce else 1)
+        crack_spawned.append(argv)
+        return FakeProc(argv, status_obj=crack_obj, rc=crack_rc, crack=True, secret=secret)
+
+    monkeypatch.setattr(crack_mod, "_spawn", fake_spawn)
+    return crack_spawned
+
+
 # --------------------------------------------------------------------------- #
 # Registration + status
 # --------------------------------------------------------------------------- #
@@ -237,6 +299,28 @@ def test_crack_argv_honours_mode():
 
     argv = _crack_argv(hashfile=Path("/a.hc22000"), wordlist=Path("/w.txt"), mode="16800")
     assert argv[argv.index("-m") + 1] == "16800"
+
+
+# --------------------------------------------------------------------------- #
+# hcxpcapngtool argv builder — extracts .hc22000 from a raw capture, no root
+# --------------------------------------------------------------------------- #
+def test_hcxpcapng_argv_builder(tmp_path):
+    from warlock.modules.crack import _hcxpcapng_argv
+
+    argv = _hcxpcapng_argv(capture=tmp_path / "h.cap", out=tmp_path / "h.hc22000")
+    assert argv[0].endswith("hcxpcapngtool")
+    assert argv[argv.index("-o") + 1] == str(tmp_path / "h.hc22000")  # converted out
+    assert str(tmp_path / "h.cap") in argv                            # capture input
+    assert "sudo" not in argv  # offline conversion never needs root
+
+
+def test_is_capture_recognises_capture_extensions():
+    from warlock.modules.crack import _is_capture
+
+    assert _is_capture(Path("/x/handshake.cap")) is True
+    assert _is_capture(Path("/x/dump.PCAP")) is True   # case-insensitive
+    assert _is_capture(Path("/x/dump.pcapng")) is True
+    assert _is_capture(Path("/x/ready.hc22000")) is False
 
 
 # --------------------------------------------------------------------------- #
@@ -407,3 +491,112 @@ def test_cancel_all_clears_active(monkeypatch):
 
     n = asyncio.run(scenario())
     assert n >= 1
+
+
+# --------------------------------------------------------------------------- #
+# /hashfiles lists raw captures alongside .hc22000, each tagged with its type
+# --------------------------------------------------------------------------- #
+def test_hashfiles_lists_captures_with_type_tags(client):
+    _make_hashfile("ready.hc22000")
+    _make_capture("listed.cap")
+    _make_capture("listed.pcapng")
+    r = client.get("/api/crack/hashfiles")
+    assert r.status_code == 200
+    by_name = {f["filename"]: f for f in r.json()["hashfiles"]}
+
+    assert "ready.hc22000" in by_name
+    assert by_name["ready.hc22000"]["type"] == "hc22000"
+    assert by_name["ready.hc22000"]["is_capture"] is False
+
+    assert "listed.cap" in by_name
+    assert by_name["listed.cap"]["type"] == "cap"
+    assert by_name["listed.cap"]["is_capture"] is True
+
+    assert "listed.pcapng" in by_name
+    assert by_name["listed.pcapng"]["type"] == "pcapng"
+    assert by_name["listed.pcapng"]["is_capture"] is True
+
+
+# --------------------------------------------------------------------------- #
+# Convert-then-crack — a raw .cap is converted via hcxpcapngtool, then cracked.
+# --------------------------------------------------------------------------- #
+def test_convert_then_crack(monkeypatch):
+    """submit a .cap -> CONVERT (hcxpcapngtool) -> CRACK -> cracked passphrase."""
+    from warlock.modules import crack as crack_mod
+
+    _engage(bssids=[IN_SCOPE])
+    cap = _make_capture("good.cap")
+    wl = _make_wordlist()
+    crack_spawned = _install_convert_spawn(monkeypatch, produce=True, secret="hunter2")
+
+    async def scenario():
+        q = crack_mod.CrackQueue()
+        job = await q.submit(hashfile=cap, wordlist=wl, mode="22000", target=IN_SCOPE, note="t")
+        await job.task
+        return job
+
+    job = asyncio.run(scenario())
+    assert job.status == "cracked"
+    assert job.cracked == "hunter2"
+    assert job.progress == 100.0
+    # the job cracked a CONVERTED .hc22000, not the raw capture it was submitted with
+    assert job.converted is True
+    assert job.hashfile == str(cap)
+    assert job.crack_input.endswith(".hc22000")
+    assert job.crack_input != job.hashfile
+    # the converted file actually landed under captures/wifi/cracked/
+    assert Path(job.crack_input).exists()
+    assert "cracked" in Path(job.crack_input).parts
+    # the crack subprocess ran against the converted file
+    assert crack_spawned and str(job.crack_input) in crack_spawned[0]
+    # conversion is surfaced as a step in the job log
+    assert any("[convert]" in line for line in job.tail)
+
+
+def test_convert_no_handshake_fails_cleanly(monkeypatch):
+    """A capture with no usable handshake -> CLEAN fail, hashcat never spawns."""
+    from warlock.modules import crack as crack_mod
+
+    _engage(bssids=[IN_SCOPE])
+    cap = _make_capture("empty.cap")
+    wl = _make_wordlist()
+    crack_spawned = _install_convert_spawn(monkeypatch, produce=False)
+
+    async def scenario():
+        q = crack_mod.CrackQueue()
+        job = await q.submit(hashfile=cap, wordlist=wl, mode="22000", target=IN_SCOPE, note="t")
+        await job.task
+        return job
+
+    job = asyncio.run(scenario())
+    assert job.status == "failed"
+    assert job.reason == "no crackable handshake/PMKID in capture"
+    assert job.cracked is None
+    # short-circuit proven: hashcat was never spawned for the unconvertible capture
+    assert crack_spawned == []
+    # no empty .hc22000 was left behind as a usable crack input
+    assert not Path(job.crack_input).exists()
+    assert job.finished_at is not None
+
+
+def test_direct_hc22000_skips_conversion(monkeypatch):
+    """A direct .hc22000 submission is cracked as-is — no conversion step."""
+    from warlock.modules import crack as crack_mod
+
+    _engage(bssids=[IN_SCOPE])
+    hf = _make_hashfile("direct.hc22000")
+    wl = _make_wordlist()
+    crack_spawned = _install_convert_spawn(monkeypatch, produce=False)  # would fail IF converted
+
+    async def scenario():
+        q = crack_mod.CrackQueue()
+        job = await q.submit(hashfile=hf, wordlist=wl, mode="22000", target=IN_SCOPE, note="t")
+        await job.task
+        return job
+
+    job = asyncio.run(scenario())
+    assert job.converted is False
+    assert job.crack_input == str(hf)
+    assert job.status == "cracked"        # cracked directly, no conversion gate
+    assert crack_spawned and str(hf) in crack_spawned[0]
+    assert not any("[convert]" in line for line in job.tail)

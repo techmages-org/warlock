@@ -13,7 +13,7 @@ passphrase as each job runs.
   GET    /api/crack/jobs/{id}         one job (incl. recent output tail)
   POST   /api/crack/jobs/{id}/cancel  terminate a queued/running job
   GET    /api/crack/status            tool + queue summary, hashfiles, wordlists
-  GET    /api/crack/hashfiles         capturable .hc22000 files (UI dropdown)
+  GET    /api/crack/hashfiles         .hc22000 + raw .cap/.pcap/.pcapng (UI dropdown)
   GET    /api/crack/wordlists         seeded wordlists (UI dropdown)
 
 GATING — mirrors the existing ``wifi_offensive`` ``/crack`` op EXACTLY. That op
@@ -67,6 +67,17 @@ log = logging.getLogger("warlock.crack")
 HASHCAT = shutil.which("hashcat") or "/usr/bin/hashcat"
 HC22000_MODE = "22000"
 CRACK_MODES = {"22000", "16800"}  # 22000 = WPA*-PBKDF2 PMKID+EAPOL, 16800 = legacy PMKID
+
+# --- capture conversion (hcxpcapngtool) ---------------------------------------
+# airodump writes raw .cap captures; hashcat -m 22000 needs an .hc22000 hashline
+# file. hcxpcapngtool extracts the crackable PMKID/EAPOL hashes from a capture:
+#   hcxpcapngtool -o <out>.hc22000 <in>.cap
+# It produces an empty/absent outfile (and often a nonzero rc) when the capture
+# holds no usable handshake — that's the authoritative "no crackable hash" signal.
+HCXPCAPNGTOOL = shutil.which("hcxpcapngtool") or "/usr/bin/hcxpcapngtool"
+HC22000_EXT = ".hc22000"
+CAPTURE_EXTS = (".cap", ".pcap", ".pcapng")  # raw captures we auto-convert first
+NO_HANDSHAKE_REASON = "no crackable handshake/PMKID in capture"
 
 DEFAULT_STATUS_TIMER = 5  # seconds between hashcat --status-json snapshots
 MAX_JOBS = 200            # in-memory history cap (active jobs are never evicted)
@@ -156,6 +167,11 @@ def _resolve_hashfile(name: str) -> Path:
     return p
 
 
+def _is_capture(path: Path) -> bool:
+    """True if *path* is a raw capture (.cap/.pcap/.pcapng) needing conversion."""
+    return path.suffix.lower() in CAPTURE_EXTS
+
+
 def _norm_target(raw: str | None) -> str:
     """Lower-case a MAC-shaped target (scope matching is case-insensitive); pass
     any other (ESSID-style) target through unchanged."""
@@ -217,6 +233,17 @@ def _crack_argv(
     return argv
 
 
+def _hcxpcapng_argv(*, capture: Path, out: Path) -> list[str]:
+    """Build the hcxpcapngtool invocation that extracts a crackable ``.hc22000``
+    hashline file from a raw airodump capture.
+
+    ``-o <out>`` is the hashcat-22000 hashfile to write; *capture* is the sole
+    positional input. Offline, no root (no ``sudo``) — exactly like the cracker.
+    A missing handshake leaves *out* empty/absent (checked by the caller).
+    """
+    return [HCXPCAPNGTOOL, "-o", str(out), str(capture)]
+
+
 def _read_outfile(path: str | Path) -> str | None:
     """Return the recovered plaintext from an ``--outfile-format 2`` outfile."""
     p = Path(path)
@@ -267,7 +294,11 @@ class CrackJob:
     argv: list[str]
     outfile: str
     potfile: str
-    status: str = "queued"  # queued|running|cracked|exhausted|failed|cancelled|error
+    # The .hc22000 hashcat actually reads. Equals ``hashfile`` for a direct
+    # .hc22000 submission; for a raw capture it's the converted file produced by
+    # hcxpcapngtool before cracking. Empty string only on legacy construction.
+    crack_input: str = ""
+    status: str = "queued"  # queued|converting|running|cracked|exhausted|failed|cancelled|error
     submitted_at: str = field(default_factory=_now_iso)
     started_at: str | None = None
     finished_at: str | None = None
@@ -277,6 +308,7 @@ class CrackJob:
     cracked: str | None = None
     returncode: int | None = None
     error: str | None = None
+    reason: str | None = None  # clean-failure cause (e.g. no handshake in capture)
     hc_status: int | None = None
     tail: list[str] = field(default_factory=list)
     # runtime-only handles (never serialised)
@@ -288,11 +320,19 @@ class CrackJob:
     def terminal(self) -> bool:
         return self.status in ("cracked", "exhausted", "failed", "cancelled", "error")
 
+    @property
+    def converted(self) -> bool:
+        """True if a raw capture was/will be converted to ``.hc22000`` first."""
+        return bool(self.crack_input) and self.crack_input != self.hashfile
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "hashfile": self.hashfile,
             "hashfile_name": Path(self.hashfile).name,
+            "crack_input": self.crack_input,
+            "crack_input_name": Path(self.crack_input).name if self.crack_input else None,
+            "converted": self.converted,
             "wordlist": self.wordlist,
             "wordlist_name": Path(self.wordlist).name,
             "mode": self.mode,
@@ -305,6 +345,7 @@ class CrackJob:
             "cracked": self.cracked,
             "returncode": self.returncode,
             "error": self.error,
+            "reason": self.reason,
             "submitted_at": self.submitted_at,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
@@ -410,10 +451,17 @@ class CrackQueue:
         status_timer: int = DEFAULT_STATUS_TIMER,
     ) -> CrackJob:
         job_id = str(uuid4())
+        # A raw capture is converted to .hc22000 first (in _run, surfaced as a job
+        # step); a direct .hc22000 is cracked as-is. The argv ALWAYS targets the
+        # .hc22000 hashcat reads — the converted file for captures, else the input.
+        if _is_capture(hashfile):
+            crack_input = _cracked_dir() / f"{hashfile.stem}-{job_id[:8]}{HC22000_EXT}"
+        else:
+            crack_input = hashfile
         outfile = _cracked_dir() / f"{hashfile.stem}-{job_id[:8]}.cracked"
         potfile = _potfile()
         argv = _crack_argv(
-            hashfile=hashfile, wordlist=wordlist, mode=mode,
+            hashfile=crack_input, wordlist=wordlist, mode=mode,
             potfile=potfile, outfile=outfile,
             status_timer=status_timer, session=f"crack-{job_id[:8]}",
         )
@@ -424,6 +472,7 @@ class CrackQueue:
         job = CrackJob(
             id=job_id, hashfile=str(hashfile), wordlist=str(wordlist), mode=str(mode),
             target=target, note=note, argv=argv, outfile=str(outfile), potfile=str(potfile),
+            crack_input=str(crack_input),
         )
         self._jobs[job_id] = job
         self._order.append(job_id)
@@ -449,8 +498,19 @@ class CrackQueue:
                 if job.cancelled:
                     job.status = "cancelled"
                     return
-                job.status = "running"
                 job.started_at = _now_iso()
+                # Raw captures are converted to .hc22000 first. A clean failure
+                # (no handshake / tool error) short-circuits before hashcat runs.
+                if job.converted:
+                    job.status = "converting"
+                    if not await self._convert(job):
+                        if job.cancelled:
+                            job.status = "cancelled"
+                        return  # _convert set status=failed + reason (or cancelled)
+                    if job.cancelled:
+                        job.status = "cancelled"
+                        return
+                job.status = "running"
                 proc = await _spawn(job.argv)
                 job.proc = proc
                 if proc.stdout is not None:
@@ -483,6 +543,59 @@ class CrackQueue:
             if job.finished_at is None:
                 job.finished_at = _now_iso()
             await events.bus.publish(events.JOB_FINISHED, {"job_id": job.id, "status": job.status})
+
+    async def _convert(self, job: CrackJob) -> bool:
+        """Extract a crackable ``.hc22000`` from a raw capture via hcxpcapngtool.
+
+        The conversion is surfaced as a step in the job log (``job.tail``). Returns
+        ``True`` only when a NON-EMPTY hashfile is produced (the authoritative
+        signal a usable handshake/PMKID was present). On a missing handshake — or
+        any tool error — it sets the job to a CLEAN failure (``status="failed"``,
+        ``reason`` populated) and returns ``False``. It never crashes the job;
+        only a real cancellation (``CancelledError``) is allowed to propagate.
+        """
+        src = Path(job.hashfile)
+        out = Path(job.crack_input)
+        argv = _hcxpcapng_argv(capture=src, out=out)
+        job.tail.append(f"[convert] {shlex.join(argv)}")
+        try:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            proc = await _spawn(argv)
+            job.proc = proc
+            if proc.stdout is not None:
+                async for raw in proc.stdout:
+                    line = raw.decode("utf-8", errors="replace").strip()
+                    if not line:
+                        continue
+                    job.tail.append(line)
+                    if len(job.tail) > TAIL_LINES:
+                        del job.tail[:-TAIL_LINES]
+            rc = await proc.wait()
+            job.returncode = rc
+        except asyncio.CancelledError:
+            raise  # genuine cancellation — handled by _run's CancelledError arm
+        except Exception as e:  # noqa: BLE001
+            log.exception("hcxpcapngtool conversion failed for crack job %s", job.id)
+            job.status = "failed"
+            job.reason = "capture conversion (hcxpcapngtool) failed"
+            job.error = str(e)
+            return False
+        finally:
+            job.proc = None
+        # The outfile — not rc — is authoritative: hcxpcapngtool writes nothing
+        # (or an empty file) when the capture holds no crackable handshake/PMKID.
+        try:
+            produced = out.exists() and out.stat().st_size > 0
+        except OSError:
+            produced = False
+        if produced:
+            job.tail.append(f"[convert] extracted crackable hashes -> {out.name}")
+            return True
+        job.status = "failed"
+        job.reason = NO_HANDSHAKE_REASON
+        job.error = NO_HANDSHAKE_REASON
+        job.tail.append(f"[convert] {NO_HANDSHAKE_REASON}")
+        return False
 
     def _finalize(self, job: CrackJob, rc: int) -> None:
         if job.cancelled or job.status == "cancelled":
@@ -546,23 +659,36 @@ queue = CrackQueue()
 # Read helpers for the web UI dropdowns / status panel
 # --------------------------------------------------------------------------- #
 def _list_hashfiles() -> list[dict[str, Any]]:
+    """List crackable inputs for the UI/LOOT dropdown: ready-to-crack ``.hc22000``
+    hashfiles AND raw ``.cap/.pcap/.pcapng`` captures (auto-converted on submit).
+
+    Each row is tagged with ``type`` (the bare extension, e.g. ``hc22000``/``cap``)
+    and ``is_capture`` so the picker can distinguish the two. The glob is
+    NON-recursive, so converted files under ``captures/wifi/cracked/`` are never
+    listed back as inputs.
+    """
+    patterns = (f"*{HC22000_EXT}", *(f"*{ext}" for ext in CAPTURE_EXTS))
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
     for d in (_captures_dir(), _handshakes_dir()):
-        for p in sorted(d.glob("*.hc22000")):
-            if p.as_posix() in seen:
-                continue
-            seen.add(p.as_posix())
-            try:
-                st = p.stat()
-            except OSError:
-                continue
-            out.append({
-                "filename": p.name,
-                "path": p.as_posix(),
-                "size_bytes": st.st_size,
-                "mtime": datetime.utcfromtimestamp(st.st_mtime).isoformat(),
-            })
+        for pat in patterns:
+            for p in sorted(d.glob(pat)):
+                if p.as_posix() in seen:
+                    continue
+                seen.add(p.as_posix())
+                try:
+                    st = p.stat()
+                except OSError:
+                    continue
+                ext = p.suffix.lower().lstrip(".")
+                out.append({
+                    "filename": p.name,
+                    "path": p.as_posix(),
+                    "type": ext,
+                    "is_capture": p.suffix.lower() in CAPTURE_EXTS,
+                    "size_bytes": st.st_size,
+                    "mtime": datetime.utcfromtimestamp(st.st_mtime).isoformat(),
+                })
     out.sort(key=lambda h: h["mtime"], reverse=True)
     return out
 
@@ -579,7 +705,7 @@ def _list_wordlists() -> list[dict[str, Any]]:
 # Request body
 # --------------------------------------------------------------------------- #
 class CrackJobBody(BaseModel):
-    hashfile: str = Field(..., description="Path/name of a captured .hc22000 under captures/ or handshakes/")
+    hashfile: str = Field(..., description="Path/name of a .hc22000 OR a raw .cap/.pcap/.pcapng capture (auto-converted) under captures/ or handshakes/")
     wordlist: str | None = Field(default=None, description="Wordlist filename under wordlists/ (default rockyou.txt)")
     mode: str = Field(default=HC22000_MODE, description="hashcat -m mode (22000 or 16800)")
     target: str | None = Field(default=None, description="BSSID/ESSID the hash belongs to (scope-checked)")
