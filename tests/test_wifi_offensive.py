@@ -110,6 +110,7 @@ def test_status_exposes_four_ops_and_deferred(client):
         ("/api/wifi_offensive/deauth", {"bssid": IN_SCOPE}),
         ("/api/wifi_offensive/pmkid", {"bssid": IN_SCOPE}),
         ("/api/wifi_offensive/handshake", {"bssid": IN_SCOPE, "channel": 6}),
+        ("/api/wifi_offensive/wps", {"bssid": IN_SCOPE, "channel": 6}),
     ],
 )
 def test_ops_refuse_when_engagement_off(client, path, payload):
@@ -622,8 +623,137 @@ def test_in_scope_karma_submits_gated_without_target(client, monkeypatch):
 
 # --------------------------------------------------------------------------- #
 # Still-deferred ops are stubbed (501) but the routes exist
+# (wps is now implemented — see the WPS section below)
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("op", ["wps", "eaphammer"])
+@pytest.mark.parametrize("op", ["eaphammer"])
 def test_deferred_ops_return_501(client, op):
     r = client.post(f"/api/wifi_offensive/{op}")
     assert r.status_code == 501
+
+
+# --------------------------------------------------------------------------- #
+# WPS PIN attack (reaver / bully). Single in-scope BSSID target -> keeps the
+# full scope gate (target=<bssid>) exactly like deauth/handshake.
+# --------------------------------------------------------------------------- #
+def test_wps_command_builds_reaver():
+    from warlock.modules.wifi_offensive import _wps_command
+
+    argv = _wps_command(tool="reaver", bssid=IN_SCOPE, channel=6, duration=300)
+    # Bounded by `timeout` so a PIN brute can never run unbounded; root via sudo.
+    assert argv[0] == "timeout" and argv[1] == "300"
+    assert argv[2] == "sudo" and argv[3] == "-n"
+    assert argv[4].endswith("reaver")
+    assert argv[argv.index("-i") + 1] == "mon0"          # monitor iface
+    assert argv[argv.index("-b") + 1] == IN_SCOPE        # target BSSID
+    assert argv[argv.index("-c") + 1] == "6"             # channel
+    assert "-K" not in argv                               # pixie-dust off by default
+
+
+def test_wps_command_builds_bully():
+    from warlock.modules.wifi_offensive import _wps_command
+
+    argv = _wps_command(tool="bully", bssid=IN_SCOPE, channel=11, duration=300)
+    assert argv[0] == "timeout" and argv[1] == "300"
+    assert argv[2] == "sudo" and argv[3] == "-n"
+    assert argv[4].endswith("bully")
+    # bully takes the interface as a POSITIONAL arg (no -i), right after the bin.
+    assert argv[5] == "mon0"
+    assert argv[argv.index("-b") + 1] == IN_SCOPE
+    assert argv[argv.index("-c") + 1] == "11"
+    assert "-d" not in argv                               # pixie-dust off by default
+
+
+def test_wps_command_pixie_dust_flags_per_tool():
+    from warlock.modules.wifi_offensive import _wps_command
+
+    reaver = _wps_command(tool="reaver", bssid=IN_SCOPE, channel=1, pixie_dust=True)
+    assert reaver[reaver.index("-K") + 1] == "1"          # reaver Pixie-Dust = -K 1
+    bully = _wps_command(tool="bully", bssid=IN_SCOPE, channel=1, pixie_dust=True)
+    assert "-d" in bully                                   # bully Pixie-Dust = -d
+
+
+def test_wps_command_rejects_unknown_tool():
+    from fastapi import HTTPException
+
+    from warlock.modules.wifi_offensive import _wps_command
+
+    with pytest.raises(HTTPException) as ei:
+        _wps_command(tool="hashcat", bssid=IN_SCOPE, channel=1)
+    assert ei.value.status_code == 400
+
+
+def test_wps_rejects_out_of_scope(client):
+    _engage(bssids=[IN_SCOPE])
+    before = _count_violations(OUT_SCOPE)
+    r = client.post("/api/wifi_offensive/wps", json={"bssid": OUT_SCOPE, "channel": 6})
+    assert r.status_code == 403
+    # Out-of-scope BSSID refusal writes a scope.violation row.
+    assert _count_violations(OUT_SCOPE) == before + 1
+
+
+def test_wps_bad_mac_rejected_before_gate(client):
+    _engage(bssids=[IN_SCOPE])
+    r = client.post("/api/wifi_offensive/wps", json={"bssid": "not-a-mac", "channel": 6})
+    assert r.status_code == 400
+
+
+@pytest.mark.parametrize(
+    "tool,pixie,pin_flag",
+    [
+        ("reaver", False, None),
+        ("bully", False, None),
+        ("reaver", True, "-K"),
+        ("bully", True, "-d"),
+    ],
+)
+def test_in_scope_wps_submits_gated(client, monkeypatch, tool, pixie, pin_flag):
+    _engage(bssids=[IN_SCOPE])
+    import warlock.modules.wifi_offensive as wo
+
+    captured: dict = {}
+
+    async def fake_submit(type_, argv, **kw):
+        captured["type"] = type_
+        captured["argv"] = argv
+        captured["kw"] = kw
+        return "job-wps"
+
+    mon = AsyncMock(return_value="")
+    monkeypatch.setattr(wo.runner, "submit", fake_submit)
+    monkeypatch.setattr(wo, "_ensure_monitor", mon)
+    monkeypatch.setattr(wo, "_wps_tool_missing", lambda t: False)  # pretend installed
+
+    r = client.post(
+        "/api/wifi_offensive/wps",
+        json={"bssid": IN_SCOPE, "channel": 6, "tool": tool, "pixie_dust": pixie},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["job_id"] == "job-wps"
+    assert body["target"] == IN_SCOPE
+    assert body["tool"] == tool
+    assert captured["type"] == "wifi.wps"
+    assert captured["kw"]["requires_engagement"] is True  # gate is NOT bypassed
+    assert captured["kw"]["target"] == IN_SCOPE           # full scope gate
+    assert captured["argv"][0] == "timeout"               # bounded PIN attack
+    assert any(a.endswith(tool) for a in captured["argv"])
+    assert IN_SCOPE in captured["argv"]
+    if pin_flag is not None:
+        assert pin_flag in captured["argv"]               # Pixie-Dust flag present
+    mon.assert_awaited()  # WPS tools need the mon0 monitor iface
+
+
+def test_wps_503_when_tool_missing(client, monkeypatch):
+    """In-scope + engaged, but the selected WPS tool absent -> clean 503. The
+    probe lives inside the would-allow branch so it can't leak tool state to an
+    unauthorised caller."""
+    _engage(bssids=[IN_SCOPE])
+    import warlock.modules.wifi_offensive as wo
+
+    monkeypatch.setattr(wo, "_wps_tool_missing", lambda t: True)
+    r = client.post(
+        "/api/wifi_offensive/wps",
+        json={"bssid": IN_SCOPE, "channel": 6, "tool": "reaver"},
+    )
+    assert r.status_code == 503
+    assert "reaver" in r.text
