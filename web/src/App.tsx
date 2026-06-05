@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import clsx from "clsx";
 import { EngagementBanner, HudBarBottom, HudBarTop } from "./components/hud";
 import { apiGet, type ModuleInfo } from "./lib/api";
+import { Crack } from "./pages/Crack";
 import { Dashboard } from "./pages/Dashboard";
 import { Gps } from "./pages/Gps";
 import { Mesh } from "./pages/Mesh";
@@ -76,6 +77,7 @@ export default function App() {
           <Route path="/ops" element={<Ops />} />
           <Route path="/wifi_recon" element={<WifiRecon />} />
           <Route path="/wifi-recon" element={<WifiRecon />} />
+          <Route path="/crack" element={<Crack />} />
           <Route path="/sdr" element={<Sdr />} />
           <Route path="/net_recon" element={<NetRecon />} />
           <Route path="/net-recon" element={<NetRecon />} />
