@@ -299,3 +299,111 @@ def test_stop_endpoint(client, tmp_path, monkeypatch):
     r = client.post("/api/wireless_ids/stop")
     assert r.status_code == 200
     assert r.json()["ok"] is True
+
+
+# --------------------------------------------------------------------------- #
+# ALERT_FIRED bus fan-out (pager)
+# --------------------------------------------------------------------------- #
+def _mock_detections_world(monkeypatch, *, devices, alerts):
+    """Wire a running IDS with canned devices/alerts and a mocked bus.publish."""
+    monkeypatch.setattr(wi, "_is_running", lambda: True)
+    monkeypatch.setattr(
+        wi, "_read_allowlist",
+        lambda: {"ssids": ["CorpNet"], "bssids": ["aa:bb:cc:00:00:01"]},
+    )
+    monkeypatch.setattr(wi, "_fetch_devices", lambda: devices)
+    monkeypatch.setattr(wi, "_fetch_alerts", lambda: alerts)
+    pub = AsyncMock()
+    monkeypatch.setattr(wi.events.bus, "publish", pub)
+    return pub
+
+
+def test_alert_helpers_format_and_dedup_key():
+    rogue = wi._detection(
+        dtype="rogue_ap", severity="medium", bssid="11:22:33:44:55:66",
+        ssid="FreeWiFi", channel=1, detail="x",
+    )
+    assert wi._alert_message(rogue) == "rogue AP 'FreeWiFi' ch1 11:22:33:44:55:66"
+    assert wi._alert_dedup_key(rogue) == "11:22:33:44:55:66|rogue_ap"
+    flood = wi._detection(
+        dtype="deauth_flood", severity="high", bssid="de:ad:be:ef:00:99",
+        ssid="", detail="flood",
+    )
+    assert wi._alert_message(flood) == "deauth flood de:ad:be:ef:00:99"
+
+
+def test_new_detection_publishes_one_alert_per_finding(client, monkeypatch):
+    # de:ad..99 = evil_twin (high), 11:22.. FreeWiFi = rogue_ap (medium).
+    pub = _mock_detections_world(monkeypatch, devices=_DEVS, alerts=[])
+
+    r = client.get("/api/wireless_ids/detections")
+    assert r.status_code == 200
+    assert pub.call_count == 2
+
+    names = [c.args[0] for c in pub.call_args_list]
+    assert all(n == wi.events.ALERT_FIRED for n in names)
+    payloads = [c.args[1] for c in pub.call_args_list]
+    assert all(p["source"] == "wireless_ids" for p in payloads)
+    by_sev = {p["severity"]: p for p in payloads}
+    assert set(by_sev) == {"high", "medium"}
+    # severity + message land correctly per finding
+    assert by_sev["medium"]["message"] == "rogue AP 'FreeWiFi' ch1 11:22:33:44:55:66"
+    assert "de:ad:be:ef:00:99" in by_sev["high"]["message"]
+    assert by_sev["high"]["message"].startswith("evil-twin 'CorpNet'")
+
+
+def test_repeat_detection_is_not_republished(client, monkeypatch):
+    pub = _mock_detections_world(monkeypatch, devices=_DEVS, alerts=[])
+
+    client.get("/api/wireless_ids/detections")
+    assert pub.call_count == 2
+    # Same kismet view on the next poll → no new pages (dedup by bssid|kind).
+    client.get("/api/wireless_ids/detections")
+    assert pub.call_count == 2
+
+
+def test_deauth_flood_publishes_high_and_dedups(client, monkeypatch):
+    alerts = [{
+        "kismet.alert.header": "DEAUTHFLOOD", "kismet.alert.text": "flood",
+        "kismet.alert.transmitter_mac": "DE:AD:BE:EF:00:99", "kismet.alert.channel": 6,
+    }]
+    pub = _mock_detections_world(monkeypatch, devices=[], alerts=alerts)
+
+    client.get("/api/wireless_ids/detections")
+    assert pub.call_count == 1
+    payload = pub.call_args.args[1]
+    assert payload["severity"] == "high"
+    assert payload["source"] == "wireless_ids"
+    assert "de:ad:be:ef:00:99" in payload["message"]
+    # repeat poll → deduped
+    client.get("/api/wireless_ids/detections")
+    assert pub.call_count == 1
+
+
+def test_generic_kismet_alert_is_not_paged(client, monkeypatch):
+    # A non-flood kismet alert (kismet_alert, low) must NOT page the operator.
+    alerts = [{"kismet.alert.header": "APSPOOF", "kismet.alert.text": "spoofed ap"}]
+    pub = _mock_detections_world(monkeypatch, devices=[], alerts=alerts)
+    client.get("/api/wireless_ids/detections")
+    assert pub.call_count == 0
+
+
+def test_stop_resets_dedup_so_redetection_repages(client, tmp_path, monkeypatch):
+    alerts = [{
+        "kismet.alert.header": "DEAUTHFLOOD",
+        "kismet.alert.transmitter_mac": "DE:AD:BE:EF:00:99",
+    }]
+    pub = _mock_detections_world(monkeypatch, devices=[], alerts=alerts)
+
+    client.get("/api/wireless_ids/detections")
+    assert pub.call_count == 1
+
+    monkeypatch.setattr(wi, "PID_PATH", tmp_path / "kismet.pid")
+    monkeypatch.setattr(wi, "STATE_PATH", tmp_path / "kismet.state")
+    (tmp_path / "kismet.state").write_text('{"pid": 999999}')
+    monkeypatch.setattr(wi, "_run_helper", AsyncMock(return_value="managed"))
+    client.post("/api/wireless_ids/stop")
+
+    # After stop reset, the same detection pages again.
+    client.get("/api/wireless_ids/detections")
+    assert pub.call_count == 2

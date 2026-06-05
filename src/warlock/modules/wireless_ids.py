@@ -40,6 +40,7 @@ import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from warlock import events
 from warlock.config import get_settings
 from warlock.modules._base import ModuleBase
 
@@ -78,6 +79,11 @@ DEVICE_FIELDS: list[list[str]] = [
 _FLOOD_TOKENS = ("DEAUTH", "DISASSOC", "DISCON")
 
 _SEVERITY_RANK = {"high": 3, "medium": 2, "low": 1, "info": 0}
+
+# Detection kinds we fan into the system-wide ALERT_FIRED bus (the activity
+# pager). Generic low-severity ``kismet_alert`` rows are intentionally excluded —
+# only actionable IDS hits page the operator.
+_ALERTABLE_TYPES = ("rogue_ap", "evil_twin", "deauth_flood")
 
 
 # --------------------------------------------------------------------------- #
@@ -261,6 +267,28 @@ def _detection(
         "last_seen": last_seen,
         "source": source,
     }
+
+
+def _alert_dedup_key(det: dict[str, Any]) -> str:
+    """Stable identity for a detection — ``bssid|kind``. Lets the module page a
+    given (radio, finding) pair exactly once per capture session."""
+    return f"{det.get('bssid') or ''}|{det.get('type') or ''}"
+
+
+def _alert_message(det: dict[str, Any]) -> str:
+    """Human one-liner for the pager feed, e.g. ``rogue AP 'FreeWiFi' ch1 <bssid>``."""
+    ssid = (det.get("ssid") or "").strip()
+    bssid = det.get("bssid") or ""
+    ch = det.get("channel")
+    chs = f" ch{ch}" if ch is not None else ""
+    dtype = det.get("type")
+    if dtype == "rogue_ap":
+        return f"rogue AP '{ssid}'{chs} {bssid}".strip()
+    if dtype == "evil_twin":
+        return f"evil-twin '{ssid}'{chs} {bssid}".strip()
+    if dtype == "deauth_flood":
+        return f"deauth flood{chs} {bssid}".strip()
+    return f"{dtype}{chs} {bssid}".strip()
 
 
 def classify_devices(
@@ -568,12 +596,45 @@ class Module(ModuleBase):
     icon = "🛡"
     requires_engagement = False  # defensive / passive monitoring — always allowed
 
+    def __init__(self) -> None:
+        super().__init__()
+        # ``bssid|kind`` keys already fanned into the ALERT_FIRED bus this capture
+        # session, so each NEW detection pages exactly once (no per-poll spam).
+        self._published_alerts: set[str] = set()
+
+    async def _publish_new_detections(self, dets: list[dict[str, Any]]) -> None:
+        """Fan each NEW actionable detection into the ALERT_FIRED bus exactly once.
+
+        Best-effort: a bus failure rolls back the dedup mark so the next poll can
+        retry, and never propagates out of ``/detections``.
+        """
+        for det in dets:
+            if det.get("type") not in _ALERTABLE_TYPES:
+                continue
+            key = _alert_dedup_key(det)
+            if key in self._published_alerts:
+                continue
+            self._published_alerts.add(key)
+            try:
+                await events.bus.publish(
+                    events.ALERT_FIRED,
+                    {
+                        "severity": det.get("severity", "medium"),
+                        "source": self.id,
+                        "message": _alert_message(det),
+                    },
+                )
+            except Exception:  # noqa: BLE001 — pager fan-out must never break /detections
+                self._published_alerts.discard(key)
+                log.exception("wireless_ids: failed to publish ALERT_FIRED")
+
     async def on_shutdown(self) -> None:
         if _is_running():
             try:
                 await _stop_kismet()
             except Exception:  # noqa: BLE001
                 log.exception("wireless_ids shutdown stop failed")
+        self._published_alerts.clear()
 
     def router(self) -> APIRouter:
         r = APIRouter(prefix="/api/wireless_ids", tags=[self.id])
@@ -607,14 +668,17 @@ class Module(ModuleBase):
         async def start(body: StartBody | None = None) -> dict[str, Any]:
             body = body or StartBody()
             st = await _start_kismet(body.channels, body.iface)
+            self._published_alerts.clear()  # fresh capture session → re-page hits
             return {"ok": True, "state": st}
 
         @r.post("/stop")
         async def stop() -> dict[str, Any]:
-            return await _stop_kismet()
+            result = await _stop_kismet()
+            self._published_alerts.clear()  # reset dedup so a re-detect re-pages
+            return result
 
         @r.get("/detections")
-        def detections() -> dict[str, Any]:
+        async def detections() -> dict[str, Any]:
             allow = _read_allowlist()
             dets: list[dict[str, Any]] = []
             errors: list[str] = []
@@ -629,6 +693,7 @@ class Module(ModuleBase):
             except Exception as e:  # noqa: BLE001
                 errors.append(f"alerts: {e}")
             dets = _sort_detections(dets)
+            await self._publish_new_detections(dets)
             counts = {
                 "rogue_ap": sum(1 for d in dets if d["type"] == "rogue_ap"),
                 "evil_twin": sum(1 for d in dets if d["type"] == "evil_twin"),
