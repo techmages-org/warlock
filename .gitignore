@@ -36,3 +36,7 @@ npm-debug.log*
 .env.local
 .env.*.local
 secrets.yaml
+
+# Local ops docs (build playbooks, handoffs, orchestration logs) — contain creds, never push
+ops/
+HANDOFF.md

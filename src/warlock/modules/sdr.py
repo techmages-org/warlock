@@ -3,7 +3,7 @@
 Features in this wave:
   * rtl_test-driven device probe (tuner type, count, blacklist state).
   * ADS-B via readsb (systemd-managed). ``/adsb/aircraft`` tails
-    ``http://127.0.0.1:8080/data/aircraft.json``; ``/adsb/start|stop``
+    ``http://127.0.0.1:8504/data/aircraft.json``; ``/adsb/start|stop``
     flips the unit.
   * rtl_433 runs as an on-demand background subprocess, writing one
     JSON-lines event per line into ``/tmp/warlock-rtl433.jsonl``.
@@ -267,7 +267,7 @@ def _rtl433_tail(n: int = 100) -> list[dict[str, Any]]:
 
 
 async def _fetch_readsb_aircraft() -> dict[str, Any]:
-    url = "http://127.0.0.1:8080/data/aircraft.json"
+    url = "http://127.0.0.1:8504/data/aircraft.json"
     try:
         async with httpx.AsyncClient(timeout=2.0) as client:
             r = await client.get(url)
