@@ -15,6 +15,7 @@ import { Sdr } from "./pages/Sdr";
 import { Stub } from "./pages/Stub";
 import { System } from "./pages/System";
 import { WifiRecon } from "./pages/WifiRecon";
+import { Wireless } from "./pages/Wireless";
 
 // Modules still rendered via the fallback StubPanel (no dedicated page yet).
 const STUBBED = [
@@ -37,6 +38,25 @@ function ModuleRail() {
       aria-label="module navigation"
       className="sticky top-6 z-20 flex h-10 items-center gap-1 overflow-x-auto border-b border-line-dim bg-bg-strip/90 px-3 backdrop-blur-sm"
     >
+      {/* Manual flagship entry — the guided "Wireless" flow is a frontend-only
+          page (no backend module), so it isn't in /api/modules; pin it first,
+          alongside the auto-generated module rail. */}
+      <NavLink
+        to="/wireless"
+        title="Guided wireless flow — arm · recon · target · act · loot"
+        className={({ isActive }) =>
+          clsx(
+            "hud-btn whitespace-nowrap",
+            isActive && "border-violet-base text-violet-bright shadow-glow-violet",
+          )
+        }
+      >
+        <span className="flex items-center gap-1.5">
+          <span aria-hidden="true" className="text-amber-base">⌖</span>
+          <span>Wireless</span>
+        </span>
+      </NavLink>
+
       {modules.map((m) => (
         <NavLink
           key={m.id}
@@ -79,6 +99,7 @@ export default function App() {
           <Route path="/ops" element={<Ops />} />
           <Route path="/wifi_recon" element={<WifiRecon />} />
           <Route path="/wifi-recon" element={<WifiRecon />} />
+          <Route path="/wireless" element={<Wireless />} />
           <Route path="/crack" element={<Crack />} />
           <Route path="/sdr" element={<Sdr />} />
           <Route path="/net_recon" element={<NetRecon />} />
