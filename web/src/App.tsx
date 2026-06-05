@@ -3,6 +3,8 @@ import { useEffect, useState } from "react";
 import clsx from "clsx";
 import { EngagementBanner, HudBarBottom, HudBarTop } from "./components/hud";
 import { apiGet, type ModuleInfo } from "./lib/api";
+import { Audit } from "./pages/Audit";
+import { Blue } from "./pages/Blue";
 import { Crack } from "./pages/Crack";
 import { Dashboard } from "./pages/Dashboard";
 import { Gps } from "./pages/Gps";
@@ -81,6 +83,10 @@ export default function App() {
           <Route path="/sdr" element={<Sdr />} />
           <Route path="/net_recon" element={<NetRecon />} />
           <Route path="/net-recon" element={<NetRecon />} />
+          <Route path="/wireless_ids" element={<Blue />} />
+          <Route path="/blue" element={<Blue />} />
+          <Route path="/server_audit" element={<Audit />} />
+          <Route path="/audit" element={<Audit />} />
           <Route path="/system" element={<System />} />
           {STUBBED.map((mid) => (
             <Route key={mid} path={`/${mid}`} element={<Stub moduleId={mid} />} />
