@@ -35,14 +35,49 @@ type AuditRow = {
   outcome: string;
 };
 
-type Tab = "active" | "new" | "history" | "audit";
+type ReportData = {
+  ok: boolean;
+  engagement_id: string;
+  filename: string;
+  generated_at: string;
+  sections: string[];
+  stats: {
+    audit_total: number;
+    ops_submitted: number;
+    ops_by_type: Record<string, number>;
+    scope_violations: number;
+    targets_engaged: number;
+    scans_run: number;
+    hosts_discovered: number;
+    captures_recorded: number;
+    evidence_artifacts: number;
+    duration: string;
+  };
+  markdown: string;
+  html: string;
+};
+
+type Tab = "active" | "new" | "history" | "audit" | "report";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "active", label: "Active" },
   { id: "new", label: "New" },
   { id: "history", label: "History" },
   { id: "audit", label: "Audit" },
+  { id: "report", label: "Report" },
 ];
+
+function downloadFile(filename: string, content: string, mime: string): void {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
 
 function fmtElapsed(sec: number | null): string {
   if (sec == null) return "—";
@@ -58,6 +93,25 @@ export function Ops() {
   const [history, setHistory] = useState<EngagementRow[]>([]);
   const [audit, setAudit] = useState<AuditRow[]>([]);
   const [note, setNote] = useState<string>("");
+  const [report, setReport] = useState<ReportData | null>(null);
+  const [reportBusy, setReportBusy] = useState(false);
+
+  const loadReport = useCallback(async (engagementId: string) => {
+    setReportBusy(true);
+    setTab("report");
+    setNote("");
+    try {
+      const d = await apiGet<ReportData>(
+        `/api/ops/engagements/${engagementId}/report`,
+      );
+      setReport(d);
+    } catch (e) {
+      setReport(null);
+      setNote(`report failed: ${e}`);
+    } finally {
+      setReportBusy(false);
+    }
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -141,6 +195,7 @@ export function Ops() {
       {tab === "active" && (
         <ActiveTab
           status={status}
+          onReport={(id) => loadReport(id)}
           onEnd={async () => {
             try {
               await apiPost("/api/ops/engagements/end");
@@ -171,8 +226,11 @@ export function Ops() {
         />
       )}
 
-      {tab === "history" && <HistoryTab rows={history} />}
+      {tab === "history" && (
+        <HistoryTab rows={history} onReport={(id) => loadReport(id)} />
+      )}
       {tab === "audit" && <AuditTab rows={audit} />}
+      {tab === "report" && <ReportTab report={report} busy={reportBusy} />}
     </div>
   );
 }
@@ -181,10 +239,12 @@ function ActiveTab({
   status,
   onEnd,
   onKill,
+  onReport,
 }: {
   status: OpsStatus | null;
   onEnd: () => void;
   onKill: () => void;
+  onReport: (engagementId: string) => void;
 }) {
   const engaged = status?.mode === "on";
   return (
@@ -252,6 +312,14 @@ function ActiveTab({
           onClick={onKill}
         >
           ⚠ KILL SWITCH
+        </button>
+        <button
+          className="hud-btn border-cyan-signal text-cyan-signal"
+          onClick={() => status?.engagement_id && onReport(status.engagement_id)}
+          disabled={!status?.engagement_id}
+          title={status?.engagement_id ? "Build a client-ready report" : "No engagement to report on"}
+        >
+          📄 GENERATE REPORT
         </button>
         <span className="ml-2 flex items-center gap-2 text-txt-dim">
           <StatusLED color={engaged ? "pink" : "mint"} />
@@ -333,7 +401,13 @@ function NewTab({
   );
 }
 
-function HistoryTab({ rows }: { rows: EngagementRow[] }) {
+function HistoryTab({
+  rows,
+  onReport,
+}: {
+  rows: EngagementRow[];
+  onReport: (engagementId: string) => void;
+}) {
   return (
     <Tile title="ENGAGEMENT HISTORY" padded={false} led={rows.length > 0 ? "cyan" : "amber"}>
       <div className="overflow-auto">
@@ -345,12 +419,13 @@ function HistoryTab({ rows }: { rows: EngagementRow[] }) {
               <th className="hud-label px-3 py-2 text-left">Started</th>
               <th className="hud-label px-3 py-2 text-left">Ended</th>
               <th className="hud-label px-3 py-2 text-left">Targets</th>
+              <th className="hud-label px-3 py-2 text-left">Report</th>
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 && (
               <tr>
-                <td colSpan={5} className="px-3 py-4 text-txt-dim">no engagements yet</td>
+                <td colSpan={6} className="px-3 py-4 text-txt-dim">no engagements yet</td>
               </tr>
             )}
             {rows.map((r) => (
@@ -364,6 +439,15 @@ function HistoryTab({ rows }: { rows: EngagementRow[] }) {
                 <td className="px-3 py-1 text-txt-dim tabular-nums">{(r.started_at ?? "—").slice(0, 19)}</td>
                 <td className="px-3 py-1 text-txt-dim tabular-nums">{(r.ended_at ?? "—").slice(0, 19)}</td>
                 <td className="px-3 py-1 text-violet-bright tabular-nums">{r.targets_count}</td>
+                <td className="px-3 py-1">
+                  <button
+                    className="hud-btn border-cyan-signal text-cyan-signal px-2 py-0.5 text-[0.75rem]"
+                    onClick={() => onReport(r.id)}
+                    title="Generate a client-ready report for this engagement"
+                  >
+                    📄 Report
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -409,5 +493,122 @@ function AuditTab({ rows }: { rows: AuditRow[] }) {
         </table>
       </div>
     </Tile>
+  );
+}
+
+function ReportStat({ label, value }: { label: string; value: string | number }) {
+  return (
+    <Tile title={label}>
+      <BigValue value={String(value)} color="cyan" size="md" />
+    </Tile>
+  );
+}
+
+function ReportTab({ report, busy }: { report: ReportData | null; busy: boolean }) {
+  const [view, setView] = useState<"preview" | "markdown">("preview");
+
+  if (busy) {
+    return (
+      <Tile title="REPORT" led="cyan">
+        <div className="text-txt-dim">building report…</div>
+      </Tile>
+    );
+  }
+  if (!report) {
+    return (
+      <Tile title="REPORT" led="amber">
+        <div className="text-txt-body space-y-1">
+          <div>No report loaded.</div>
+          <div className="text-txt-dim text-[0.8125rem]">
+            Use <span className="text-cyan-signal">📄 GENERATE REPORT</span> on the
+            Active tab, or <span className="text-cyan-signal">📄 Report</span> on a row
+            in History, to build a client-ready engagement report.
+          </div>
+        </div>
+      </Tile>
+    );
+  }
+
+  const s = report.stats;
+  return (
+    <div className="space-y-4">
+      <Tile title="REPORT" led="cyan">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <BigValue value={report.filename} color="cyan" size="md" />
+            <div className="mt-1 text-txt-dim text-[0.8125rem]">
+              engagement <span className="break-all">{report.engagement_id}</span> ·
+              generated {report.generated_at.replace("T", " ").slice(0, 19)} UTC
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              className="hud-btn border-amber-base text-amber-base"
+              onClick={() =>
+                downloadFile(`${report.filename}.md`, report.markdown, "text/markdown")
+              }
+            >
+              ⬇ MARKDOWN
+            </button>
+            <button
+              className="hud-btn border-violet-base text-violet-bright"
+              onClick={() =>
+                downloadFile(`${report.filename}.html`, report.html, "text/html")
+              }
+            >
+              ⬇ HTML
+            </button>
+          </div>
+        </div>
+      </Tile>
+
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+        <ReportStat label="OPS RUN" value={s.ops_submitted} />
+        <ReportStat label="VIOLATIONS" value={s.scope_violations} />
+        <ReportStat label="HOSTS FOUND" value={s.hosts_discovered} />
+        <ReportStat label="CAPTURES" value={s.captures_recorded} />
+        <ReportStat label="SCANS" value={s.scans_run} />
+        <ReportStat label="TARGETS" value={s.targets_engaged} />
+        <ReportStat label="ARTIFACTS" value={s.evidence_artifacts} />
+        <ReportStat label="DURATION" value={s.duration} />
+      </div>
+
+      <div role="tablist" className="flex gap-1">
+        <button
+          role="tab"
+          aria-selected={view === "preview"}
+          className="hud-btn"
+          data-active={view === "preview" ? "true" : undefined}
+          onClick={() => setView("preview")}
+        >
+          Preview
+        </button>
+        <button
+          role="tab"
+          aria-selected={view === "markdown"}
+          className="hud-btn"
+          data-active={view === "markdown" ? "true" : undefined}
+          onClick={() => setView("markdown")}
+        >
+          Markdown
+        </button>
+      </div>
+
+      {view === "preview" ? (
+        <Tile title="HTML PREVIEW" padded={false} led="cyan">
+          <iframe
+            title="report-preview"
+            srcDoc={report.html}
+            className="w-full h-[640px] border-0 bg-white"
+          />
+        </Tile>
+      ) : (
+        <Tile title="MARKDOWN SOURCE" padded={false} led="violet">
+          <pre className="max-h-[640px] overflow-auto whitespace-pre-wrap p-3 text-[0.8125rem] text-txt-body">
+            {report.markdown}
+          </pre>
+        </Tile>
+      )}
+    </div>
   );
 }

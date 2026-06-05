@@ -8,7 +8,9 @@ history, audit, killswitch).
 """
 from __future__ import annotations
 
+import html as html_lib
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -16,9 +18,10 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import desc
 
+from warlock.config import get_settings
 from warlock.db import session_scope
 from warlock.engagement import ScopeAllowlist, engagement, engagement_lock
-from warlock.models import AuditEntry, Engagement, Job
+from warlock.models import AuditEntry, Engagement, Job, Scan
 from warlock.modules._base import ModuleBase
 
 log = logging.getLogger("warlock.ops")
@@ -87,6 +90,473 @@ def _engagement_detail_row(row: Engagement) -> dict[str, Any]:
         "ended_at": row.ended_at.isoformat() if row.ended_at else None,
         "audit_count": audit_count,
         "jobs_count": jobs_count,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Report generation — client-ready md + HTML built from an engagement's
+# DB row (meta/scope/auth), its audit log (timeline + forensic trail), the
+# jobs it ran (op-type counts), its scans (recon results) and the artifacts
+# captured under engagements/<uuid>/ (creds + engagement metadata).
+# --------------------------------------------------------------------------- #
+class ReportBody(BaseModel):
+    engagement_id: str = Field(..., min_length=1)
+
+
+# File categories found under engagements/<uuid>/. Capture/hash/credentials are
+# treated as "evidence" (real findings); the rest are operational metadata.
+_EVIDENCE_CATEGORIES = {"capture", "hash", "credentials", "scan"}
+# Capture-file extensions we recognise inside a job's argv (handshake/PMKID).
+_CAPTURE_RE = re.compile(r"[\w./-]+\.(?:pcapng|pcap|cap|hc22000)", re.IGNORECASE)
+
+
+def _human_size(n: int) -> str:
+    f = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if f < 1024 or unit == "GB":
+            return f"{int(f)} {unit}" if unit == "B" else f"{f:.1f} {unit}"
+        f /= 1024.0
+    return f"{f:.1f} GB"
+
+
+def _slug(name: str) -> str:
+    s = "".join(c if c.isalnum() else "-" for c in (name or "").lower())
+    while "--" in s:
+        s = s.replace("--", "-")
+    return s.strip("-") or "engagement"
+
+
+def _fmt_dt(iso: str | None) -> str:
+    if not iso:
+        return "—"
+    return iso.replace("T", " ")[:19]
+
+
+def _fmt_duration(secs: int | None, ongoing: bool) -> str:
+    if secs is None:
+        return "—"
+    secs = max(0, secs)
+    h, rem = divmod(secs, 3600)
+    m = rem // 60
+    base = f"{h}h {m:02d}m"
+    return f"{base} (ongoing)" if ongoing else base
+
+
+def _cell(v: Any) -> str:
+    """Sanitise a value for a single markdown table cell."""
+    s = str(v if v is not None else "")
+    s = s.replace("|", "\\|").replace("\n", " ").replace("\r", " ").strip()
+    return s or "—"
+
+
+def _classify_artifact(name: str) -> str:
+    low = name.lower()
+    if low in {"engagement.yaml", "engagement.yml"}:
+        return "metadata"
+    if low == "audit.log":
+        return "audit-log"
+    if low == "killswitch.log":
+        return "killswitch-log"
+    if low.endswith((".cap", ".pcap", ".pcapng")):
+        return "capture"
+    if low.endswith(".hc22000"):
+        return "hash"
+    if low.startswith("creds") or "creds" in low:
+        return "credentials"
+    if low.endswith(".xml") or low.startswith("scan") or "nmap" in low:
+        return "scan"
+    return "other"
+
+
+def _scan_artifacts(engagement_id: str) -> list[dict[str, Any]]:
+    """Enumerate files under engagements/<uuid>/ (creds + engagement metadata).
+
+    Intentionally engagement-scoped: handshake/PMKID captures live in the
+    *global* captures/ + handshakes/ dirs and are NOT pulled in here (doing so
+    would leak other engagements' evidence into a client report). Capture paths
+    that belong to this engagement are surfaced from job argv instead.
+    """
+    base = get_settings().engagement_dir() / engagement_id
+    out: list[dict[str, Any]] = []
+    if not base.exists():
+        return out
+    for p in sorted(base.rglob("*")):
+        if not p.is_file():
+            continue
+        try:
+            size = p.stat().st_size
+        except OSError:
+            size = 0
+        out.append(
+            {
+                "name": p.relative_to(base).as_posix(),
+                "category": _classify_artifact(p.name),
+                "size": size,
+                "size_h": _human_size(size),
+            }
+        )
+    return out
+
+
+def _report_core(engagement_id: str) -> dict[str, Any] | None:
+    """Pull engagement meta + audit timeline + job/scan rollups from the DB."""
+    with session_scope() as s:
+        row = s.get(Engagement, engagement_id)
+        if row is None:
+            return None
+
+        started = row.started_at
+        ended = row.ended_at
+        ongoing = started is not None and ended is None
+        end_ref = ended or (datetime.utcnow() if started else None)
+        duration_s = (
+            int((end_ref - started).total_seconds())
+            if (started and end_ref)
+            else None
+        )
+
+        meta = {
+            "id": row.id,
+            "name": row.name,
+            "operator": row.operator,
+            "status": row.status,
+            "auth_statement": row.auth_statement or "",
+            "scope": dict(row.scope or {}),
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+            "started_at": started.isoformat() if started else None,
+            "ended_at": ended.isoformat() if ended else None,
+        }
+
+        audit = [
+            {
+                "ts": a.ts.isoformat() if a.ts else None,
+                "kind": a.kind,
+                "command": a.command,
+                "sha256": a.sha256,
+                "target": a.target,
+                "note": a.note,
+                "outcome": a.outcome,
+            }
+            for a in (
+                s.query(AuditEntry)
+                .filter(AuditEntry.engagement_id == engagement_id)
+                .order_by(AuditEntry.ts)
+                .all()
+            )
+        ]
+
+        jobs = (
+            s.query(Job)
+            .filter(Job.engagement_id == engagement_id)
+            .order_by(Job.started_at)
+            .all()
+        )
+        jobs_by_type: dict[str, int] = {}
+        capture_paths: list[str] = []
+        for j in jobs:
+            jobs_by_type[j.type] = jobs_by_type.get(j.type, 0) + 1
+            for m in _CAPTURE_RE.findall(j.argv or ""):
+                if m not in capture_paths:
+                    capture_paths.append(m)
+
+        scans = [
+            {
+                "target": sc.target,
+                "profile": sc.profile,
+                "status": sc.status,
+                "hosts_found": sc.hosts_found,
+                "started_at": sc.started_at.isoformat() if sc.started_at else None,
+            }
+            for sc in (
+                s.query(Scan)
+                .filter(Scan.engagement_id == engagement_id)
+                .order_by(Scan.started_at)
+                .all()
+            )
+        ]
+
+    return {
+        "meta": meta,
+        "audit": audit,
+        "jobs_by_type": jobs_by_type,
+        "jobs_count": sum(jobs_by_type.values()),
+        "capture_paths": capture_paths,
+        "scans": scans,
+        "duration_s": duration_s,
+        "ongoing": ongoing,
+    }
+
+
+def _report_stats(data: dict[str, Any], artifacts: list[dict[str, Any]]) -> dict[str, Any]:
+    audit = data["audit"]
+    violations = sum(1 for a in audit if a["kind"] == "scope.violation")
+    targets = sorted({a["target"] for a in audit if a["target"]})
+    evidence = [a for a in artifacts if a["category"] in _EVIDENCE_CATEGORIES]
+    return {
+        "audit_total": len(audit),
+        "ops_submitted": data["jobs_count"],
+        "ops_by_type": data["jobs_by_type"],
+        "scope_violations": violations,
+        "targets_engaged": len(targets),
+        "scans_run": len(data["scans"]),
+        "hosts_discovered": sum(sc["hosts_found"] or 0 for sc in data["scans"]),
+        "captures_recorded": len(data["capture_paths"]),
+        "evidence_artifacts": len(evidence),
+        "duration": _fmt_duration(data["duration_s"], data["ongoing"]),
+    }
+
+
+def _build_report_markdown(
+    data: dict[str, Any], stats: dict[str, Any], artifacts: list[dict[str, Any]],
+    *, generated_at: str,
+) -> tuple[str, list[str]]:
+    meta = data["meta"]
+    scope = meta["scope"]
+    lines: list[str] = []
+    sections: list[str] = []
+
+    def h2(title: str) -> None:
+        sections.append(title)
+        lines.append(f"## {title}")
+        lines.append("")
+
+    lines.append(f"# Penetration Test Report — {meta['name']}")
+    lines.append("")
+    lines.append(
+        "_Authorized engagement report generated by Warlock. "
+        "Distribution limited to the authorizing client._"
+    )
+    lines.append("")
+
+    # --- Engagement Summary -------------------------------------------------
+    h2("Engagement Summary")
+    lines.append("| Field | Value |")
+    lines.append("| --- | --- |")
+    lines.append(f"| Engagement | {_cell(meta['name'])} |")
+    lines.append(f"| Engagement ID | `{_cell(meta['id'])}` |")
+    lines.append(f"| Operator | {_cell(meta['operator'])} |")
+    lines.append(f"| Status | {_cell(meta['status'])} |")
+    lines.append(f"| Created (UTC) | {_fmt_dt(meta['created_at'])} |")
+    lines.append(f"| Started (UTC) | {_fmt_dt(meta['started_at'])} |")
+    lines.append(f"| Ended (UTC) | {_fmt_dt(meta['ended_at'])} |")
+    lines.append(f"| Duration | {_cell(stats['duration'])} |")
+    lines.append(f"| Report generated (UTC) | {_fmt_dt(generated_at)} |")
+    lines.append("")
+
+    # --- Authorization ------------------------------------------------------
+    h2("Authorization")
+    auth = meta["auth_statement"].strip()
+    if auth:
+        for ln in auth.splitlines():
+            lines.append(f"> {ln}" if ln.strip() else ">")
+    else:
+        lines.append("_No authorization statement on file._")
+    lines.append("")
+
+    # --- Scope --------------------------------------------------------------
+    h2("Scope")
+
+    def _scope_block(label: str, key: str) -> None:
+        items = [x for x in (scope.get(key) or []) if x]
+        lines.append(f"**{label} ({len(items)}):**")
+        lines.append("")
+        if items:
+            for it in items:
+                lines.append(f"- `{_cell(it)}`")
+        else:
+            lines.append("- _none_")
+        lines.append("")
+
+    _scope_block("SSIDs", "ssids")
+    _scope_block("BSSIDs", "bssids")
+    _scope_block("IP ranges / CIDRs", "ip_ranges")
+    if scope.get("planned_end"):
+        lines.append(f"_Planned end:_ {_fmt_dt(scope.get('planned_end'))} (UTC)")
+        lines.append("")
+
+    # --- Findings & Artifacts ----------------------------------------------
+    h2("Findings & Artifacts")
+    lines.append(f"- **Audit events recorded:** {stats['audit_total']}")
+    lines.append(f"- **Gated operations submitted:** {stats['ops_submitted']}")
+    lines.append(f"- **Scope violations (refused):** {stats['scope_violations']}")
+    lines.append(f"- **Distinct targets engaged:** {stats['targets_engaged']}")
+    lines.append(f"- **Recon scans run:** {stats['scans_run']}")
+    lines.append(f"- **Hosts discovered:** {stats['hosts_discovered']}")
+    lines.append(f"- **Capture files produced:** {stats['captures_recorded']}")
+    lines.append(f"- **Evidence artifacts on disk:** {stats['evidence_artifacts']}")
+    lines.append("")
+
+    if data["jobs_by_type"]:
+        lines.append("### Operations by Type")
+        lines.append("")
+        lines.append("| Operation | Count |")
+        lines.append("| --- | --- |")
+        for t in sorted(data["jobs_by_type"]):
+            lines.append(f"| {_cell(t)} | {data['jobs_by_type'][t]} |")
+        lines.append("")
+
+    if data["scans"]:
+        lines.append("### Recon Scans")
+        lines.append("")
+        lines.append("| Started (UTC) | Target | Profile | Status | Hosts |")
+        lines.append("| --- | --- | --- | --- | --- |")
+        for sc in data["scans"]:
+            lines.append(
+                f"| {_fmt_dt(sc['started_at'])} | {_cell(sc['target'])} | "
+                f"{_cell(sc['profile'])} | {_cell(sc['status'])} | {sc['hosts_found']} |"
+            )
+        lines.append("")
+
+    if data["capture_paths"]:
+        lines.append("### Capture Files")
+        lines.append("")
+        for cp in data["capture_paths"]:
+            lines.append(f"- `{_cell(cp)}`")
+        lines.append("")
+
+    lines.append("### Engagement Artifacts on Disk")
+    lines.append("")
+    if artifacts:
+        lines.append("| File | Category | Size |")
+        lines.append("| --- | --- | --- |")
+        for a in artifacts:
+            lines.append(f"| `{_cell(a['name'])}` | {_cell(a['category'])} | {a['size_h']} |")
+    else:
+        lines.append("_No artifacts captured under the engagement directory._")
+    lines.append("")
+
+    # --- Operations Timeline ------------------------------------------------
+    h2("Operations Timeline")
+    if data["audit"]:
+        lines.append("| # | Time (UTC) | Event | Target | Outcome | Note |")
+        lines.append("| --- | --- | --- | --- | --- | --- |")
+        for i, a in enumerate(data["audit"], 1):
+            lines.append(
+                f"| {i} | {_fmt_dt(a['ts'])} | {_cell(a['kind'])} | "
+                f"{_cell(a['target'])} | {_cell(a['outcome'])} | {_cell(a['note'])} |"
+            )
+    else:
+        lines.append("_No gated operations were recorded for this engagement._")
+    lines.append("")
+
+    # --- Full Audit Trail ---------------------------------------------------
+    h2("Full Audit Trail")
+    lines.append(
+        "Complete forensic record of every gated operation and policy decision, "
+        "with the exact command and its SHA-256 fingerprint."
+    )
+    lines.append("")
+    if data["audit"]:
+        lines.append("| # | Time (UTC) | Kind | Outcome | SHA-256 | Command |")
+        lines.append("| --- | --- | --- | --- | --- | --- |")
+        for i, a in enumerate(data["audit"], 1):
+            sha = (a["sha256"] or "")[:16]
+            lines.append(
+                f"| {i} | {_fmt_dt(a['ts'])} | {_cell(a['kind'])} | "
+                f"{_cell(a['outcome'])} | `{_cell(sha)}` | `{_cell(a['command'])}` |"
+            )
+    else:
+        lines.append("_Audit log is empty for this engagement._")
+    lines.append("")
+
+    lines.append("---")
+    lines.append("")
+    lines.append(
+        f"_Generated by Warlock ops module · engagement `{meta['id']}` · "
+        f"{_fmt_dt(generated_at)} UTC._"
+    )
+    lines.append("")
+
+    return "\n".join(lines), sections
+
+
+_HTML_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>__TITLE__</title>
+<style>
+  :root {
+    --bg: #0a0e0a; --tile: #0f140f; --line: #1d2a1d;
+    --txt: #c8e6c9; --dim: #6f8f6f; --hi: #e8ffe8;
+    --amber: #ffb000; --violet: #b794f6; --cyan: #5ee6d0; --pink: #ff5d8f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2rem; background: var(--bg); color: var(--txt);
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+    font-size: 14px; line-height: 1.55; max-width: 1100px; margin-inline: auto;
+  }
+  h1 { color: var(--amber); border-bottom: 2px solid var(--amber); padding-bottom: .4rem; }
+  h2 { color: var(--violet); margin-top: 2rem; border-bottom: 1px solid var(--line); padding-bottom: .25rem; }
+  h3 { color: var(--cyan); margin-top: 1.4rem; }
+  a { color: var(--cyan); }
+  code { background: var(--tile); color: var(--hi); padding: .1rem .35rem; border-radius: 3px; font-size: .92em; }
+  blockquote {
+    margin: .5rem 0; padding: .5rem 1rem; border-left: 3px solid var(--cyan);
+    background: var(--tile); color: var(--txt); white-space: pre-wrap;
+  }
+  table { border-collapse: collapse; width: 100%; margin: .75rem 0; font-size: 13px; }
+  th, td { border: 1px solid var(--line); padding: .4rem .6rem; text-align: left; vertical-align: top; }
+  th { background: var(--tile); color: var(--amber); text-transform: uppercase; letter-spacing: .04em; font-size: 11px; }
+  tr:nth-child(even) td { background: rgba(255,255,255,.015); }
+  hr { border: none; border-top: 1px solid var(--line); margin: 2rem 0; }
+  em { color: var(--dim); }
+  @media print {
+    body { background: #fff; color: #111; max-width: none; }
+    h1 { color: #000; border-color: #000; }
+    h2 { color: #1a1a1a; border-color: #999; }
+    h3 { color: #333; }
+    code { background: #f0f0f0; color: #000; }
+    blockquote { background: #f7f7f7; color: #111; border-color: #666; }
+    th { background: #eee; color: #000; }
+    th, td { border-color: #999; }
+    em { color: #555; }
+  }
+</style>
+</head>
+<body>
+__BODY__
+</body>
+</html>
+"""
+
+
+def _render_html(markdown_src: str, *, title: str) -> str:
+    try:
+        from markdown_it import MarkdownIt
+
+        body = MarkdownIt("commonmark").enable("table").render(markdown_src)
+    except Exception as e:  # noqa: BLE001 — markdown-it absent / render failure
+        log.warning("markdown render failed (%s); falling back to <pre>", e)
+        body = "<pre>" + html_lib.escape(markdown_src) + "</pre>"
+    return _HTML_TEMPLATE.replace("__TITLE__", html_lib.escape(title)).replace(
+        "__BODY__", body
+    )
+
+
+def _generate_report(engagement_id: str, *, generated_at: str) -> dict[str, Any] | None:
+    data = _report_core(engagement_id)
+    if data is None:
+        return None
+    artifacts = _scan_artifacts(engagement_id)
+    stats = _report_stats(data, artifacts)
+    markdown_src, sections = _build_report_markdown(
+        data, stats, artifacts, generated_at=generated_at
+    )
+    name = data["meta"]["name"]
+    html = _render_html(markdown_src, title=f"Warlock Report — {name}")
+    filename = f"warlock-report-{_slug(name)}-{engagement_id[:8]}"
+    return {
+        "ok": True,
+        "engagement_id": engagement_id,
+        "filename": filename,
+        "generated_at": generated_at,
+        "sections": sections,
+        "stats": stats,
+        "markdown": markdown_src,
+        "html": html,
     }
 
 
@@ -251,6 +721,24 @@ class Module(ModuleBase):
                     for a in rows
                 ]
             return {"ok": True, "audit": out, "count": len(out)}
+
+        @r.get("/engagements/{engagement_id}/report")
+        def engagement_report(engagement_id: str) -> dict[str, Any]:
+            report = _generate_report(
+                engagement_id, generated_at=datetime.utcnow().isoformat()
+            )
+            if report is None:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "engagement not found")
+            return report
+
+        @r.post("/report")
+        def post_report(body: ReportBody) -> dict[str, Any]:
+            report = _generate_report(
+                body.engagement_id, generated_at=datetime.utcnow().isoformat()
+            )
+            if report is None:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "engagement not found")
+            return report
 
         return r
 
