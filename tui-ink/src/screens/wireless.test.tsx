@@ -120,6 +120,47 @@ describe("Wireless flagship screen", () => {
     unmount();
   });
 
+  it("adds the selected RECON AP to engagement scope on 's'", async () => {
+    const ctx = mockContext(true);
+    const { lastFrame, stdin, unmount } = render(
+      <WarlockProvider value={ctx}>
+        <Wireless />
+      </WarlockProvider>,
+    );
+    await vi.waitFor(() => expect(lastFrame()).toContain("ARM THE RADIO"));
+    stdin.write("2"); // → RECON
+    await vi.waitFor(() => expect(lastFrame()).toContain("AA:BB:CC:DD:EE:01"));
+    stdin.write("s"); // add the selected (first) AP to scope
+    await vi.waitFor(() => expect(ctx.api.post as ReturnType<typeof vi.fn>).toHaveBeenCalled());
+    expect(ctx.api.post).toHaveBeenCalledWith(
+      "/api/ops/engagements/scope/add",
+      expect.objectContaining({ targets: ["HomeNet", "AA:BB:CC:DD:EE:01"] }),
+    );
+    await vi.waitFor(() => expect(lastFrame()).toContain("added HomeNet to scope ✓"));
+    unmount();
+  });
+
+  it("shows the gate hint when add-to-scope returns 409 (no active engagement)", async () => {
+    const ctx = mockContext(false);
+    (ctx.api.post as ReturnType<typeof vi.fn>).mockImplementation(async (path: string) => {
+      if (path.includes("/api/ops/engagements/scope/add")) {
+        throw new Error("409 Conflict — /api/ops/engagements/scope/add");
+      }
+      return {};
+    });
+    const { lastFrame, stdin, unmount } = render(
+      <WarlockProvider value={ctx}>
+        <Wireless />
+      </WarlockProvider>,
+    );
+    await vi.waitFor(() => expect(lastFrame()).toContain("ARM THE RADIO"));
+    stdin.write("2"); // → RECON
+    await vi.waitFor(() => expect(lastFrame()).toContain("AA:BB:CC:DD:EE:01"));
+    stdin.write("s"); // attempt add-to-scope → 409
+    await vi.waitFor(() => expect(lastFrame()).toContain("no active engagement — start one on Operations (g e)"));
+    unmount();
+  });
+
   it("shows an error tile when the recon status endpoint fails", async () => {
     const ctx = mockContext(true);
     (ctx.api.get as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("boom"));

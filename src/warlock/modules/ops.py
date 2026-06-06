@@ -152,6 +152,32 @@ class CreateEngagementBody(BaseModel):
     duration_hours: float = Field(default=4.0, ge=0.25, le=24 * 14)
 
 
+class AddScopeBody(BaseModel):
+    targets: list[str] = Field(..., min_length=1)
+
+
+# Placeholder/label literals the web form ships as input hints. Submitting these
+# verbatim would create (or grow) a scope that gates nothing — the blank-scope
+# bug. Real SSIDs won't collide with this tiny denylist.
+_PLACEHOLDER_TOKENS = {"ssid", "bssid", "ip/cidr", "cidr", "ssids", "bssids"}
+
+
+def _reject_placeholder_or_empty(targets: list[str]) -> None:
+    """Raise HTTP 400 if scope is all-blank OR contains a placeholder literal."""
+    cleaned = [t for t in ((raw or "").strip() for raw in targets) if t]
+    if not cleaned:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "targets must include at least one SSID / BSSID / IP / CIDR",
+        )
+    bad = sorted({t for t in cleaned if t.lower() in _PLACEHOLDER_TOKENS})
+    if bad:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "placeholder/label tokens are not valid scope targets: " + ", ".join(bad),
+        )
+
+
 def _split_targets(targets: list[str]) -> ScopeAllowlist:
     """Heuristic splitter: IP/CIDR → ip_ranges, hex MACs → bssids, else ssids."""
     ssids: list[str] = []
@@ -722,6 +748,7 @@ class Module(ModuleBase):
 
         @r.post("/engagements", status_code=status.HTTP_201_CREATED)
         async def create_engagement(body: CreateEngagementBody) -> dict[str, Any]:
+            _reject_placeholder_or_empty(body.targets)
             scope = _split_targets(body.targets)
             if not (scope.ssids or scope.bssids or scope.ip_ranges):
                 raise HTTPException(
@@ -772,6 +799,45 @@ class Module(ModuleBase):
                 "engagement_id": eid,
                 "status": engagement.status(),
             }
+
+        @r.post("/engagements/scope/add")
+        async def add_scope(body: AddScopeBody) -> dict[str, Any]:
+            """Authorize new targets on the active engagement, inline.
+
+            Classifies ``targets`` the same way ``create_engagement`` does,
+            rejects blank/placeholder tokens, then appends them to BOTH the live
+            ``engagement`` singleton (the gate) and the persisted
+            ``Engagement.scope`` row (reports/list) so the two stay consistent.
+            """
+            _reject_placeholder_or_empty(body.targets)
+            delta = _split_targets(body.targets)
+            if not (delta.ssids or delta.bssids or delta.ip_ranges):
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    "targets must include at least one SSID / BSSID / IP / CIDR",
+                )
+            async with engagement_lock:
+                if not engagement.is_on():
+                    raise HTTPException(
+                        status.HTTP_409_CONFLICT, "no active engagement"
+                    )
+                try:
+                    updated = engagement.add_scope_targets(delta)
+                except RuntimeError as e:
+                    raise HTTPException(status.HTTP_409_CONFLICT, str(e)) from e
+                # Keep the DB row consistent. The singleton's three lists are the
+                # merged+deduped source of truth; overlay them onto the stored
+                # scope so other keys (e.g. planned_end) survive.
+                eid = engagement.engagement_id
+                with session_scope() as s:
+                    row = s.get(Engagement, eid)
+                    if row is not None:
+                        sc = dict(row.scope or {})
+                        sc["ssids"] = list(updated.get("ssids", []))
+                        sc["bssids"] = list(updated.get("bssids", []))
+                        sc["ip_ranges"] = list(updated.get("ip_ranges", []))
+                        row.scope = sc
+            return {"ok": True, "added": delta.to_dict(), "scope": updated}
 
         @r.post("/engagements/end")
         async def end_engagement() -> dict[str, Any]:

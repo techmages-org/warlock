@@ -124,6 +124,53 @@ class EngagementMode:
         )
         return self.engagement_id
 
+    def add_scope_targets(self, delta: ScopeAllowlist) -> dict:
+        """Append targets to the ACTIVE engagement's scope (deduped, in-place).
+
+        Used to authorize a freshly-recon'd AP/host without ending the
+        engagement. BSSIDs are stored lowercase to stay consistent with
+        ``matches()`` (which lowercases on compare) and the ``_split_targets``
+        convention; SSIDs / IP ranges keep their form but are deduped
+        case-insensitively (matches() is already case-insensitive). The
+        engagement.yaml scope block is rewritten and a ``SCOPE_ADDED`` audit
+        entry is appended. Returns the full updated scope dict.
+        """
+        if not self.is_on():
+            raise RuntimeError("no active engagement")
+
+        def _merge(existing: list[str], incoming: list[str], *, lower: bool) -> list[str]:
+            out = list(existing)
+            seen = {x.lower() for x in existing}
+            for raw in incoming:
+                v = raw.lower() if lower else raw
+                key = v.lower()
+                if not v or key in seen:
+                    continue
+                seen.add(key)
+                out.append(v)
+            return out
+
+        self.scope.ssids = _merge(self.scope.ssids, delta.ssids, lower=False)
+        self.scope.bssids = _merge(self.scope.bssids, delta.bssids, lower=True)
+        self.scope.ip_ranges = _merge(self.scope.ip_ranges, delta.ip_ranges, lower=False)
+
+        # Rewrite the engagement.yaml scope block, preserving every other key.
+        settings = get_settings()
+        edir = settings.engagement_dir() / self.engagement_id  # type: ignore[operator]
+        ypath = edir / "engagement.yaml"
+        try:
+            data = yaml.safe_load(ypath.read_text()) if ypath.exists() else {}
+        except Exception:  # noqa: BLE001 — a corrupt yaml must not block the mutation
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        data["scope"] = self.scope.to_dict()
+        edir.mkdir(parents=True, exist_ok=True)
+        ypath.write_text(yaml.safe_dump(data))
+
+        self._append_audit("SCOPE_ADDED", {"added": delta.to_dict()})
+        return self.scope.to_dict()
+
     async def end(self) -> None:
         if self._mode == "off":
             return

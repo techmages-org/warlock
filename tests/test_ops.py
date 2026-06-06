@@ -320,3 +320,139 @@ def test_audit_note_with_pipe_is_escaped(client):
     assert "with \\| pipe" in md
     # Newline collapsed to a space (no row break injected).
     assert "and newline" in md
+
+
+# --------------------------------------------------------------------------- #
+# Inline scope authorization + placeholder/blank-scope rejection
+#   POST /api/ops/engagements                — reject placeholder/blank scope
+#   POST /api/ops/engagements/scope/add      — authorize a recon'd AP inline
+# --------------------------------------------------------------------------- #
+@pytest.fixture(autouse=True)
+def _engagement_off(client):
+    """Force the process-global engagement singleton OFF around every test.
+
+    ``warlock.engagement.engagement`` is shared by every test in the session;
+    ending it through the API (not ``asyncio.run``) keeps the event bus on the
+    TestClient's own loop, avoiding a cross-loop lock error.
+    """
+    from warlock.engagement import engagement
+
+    def _force_off() -> None:
+        if engagement.is_on():
+            client.post("/api/ops/engagements/end")
+
+    _force_off()
+    yield
+    _force_off()
+
+
+def test_create_engagement_rejects_placeholder_targets(client):
+    """The blank-scope bug: form placeholder literals must NOT create scope."""
+    r = client.post(
+        "/api/ops/engagements",
+        json={
+            "name": "Bad Scope",
+            "authorization": "lab environment",
+            "targets": ["SSID", "BSSID", "IP/CIDR"],
+        },
+    )
+    assert r.status_code == 400, r.text
+    # Nothing was activated.
+    assert client.get("/api/ops/status").json()["mode"] == "off"
+
+
+def test_scope_add_authorizes_recond_ap_inline(client):
+    """A recon'd AP can be authorized into the active engagement's scope."""
+    from warlock.engagement import engagement
+
+    create = client.post(
+        "/api/ops/engagements",
+        json={
+            "name": "Inline Scope Add",
+            "authorization": "Authorized lab engagement.",
+            "targets": ["corp-lab", "10.10.0.0/24"],
+            "duration_hours": 2,
+        },
+    )
+    assert create.status_code == 201, create.text
+    eid = create.json()["engagement_id"]
+
+    # The recon'd AP is NOT yet in scope → the gate refuses it.
+    assert engagement.check_target("20:23:51:91:66:40") is False
+
+    add = client.post(
+        "/api/ops/engagements/scope/add",
+        json={"targets": ["jb-wifi7", "20:23:51:91:66:40"]},
+    )
+    assert add.status_code == 200, add.text
+    body = add.json()
+    assert body["ok"] is True
+    # Echoed delta (just what was added), classified the same as create.
+    assert body["added"]["ssids"] == ["jb-wifi7"]
+    assert body["added"]["bssids"] == ["20:23:51:91:66:40"]
+    # Full merged scope: new targets + the pre-existing ones, deduped.
+    assert "jb-wifi7" in body["scope"]["ssids"]
+    assert "corp-lab" in body["scope"]["ssids"]
+    assert "20:23:51:91:66:40" in body["scope"]["bssids"]
+    assert "10.10.0.0/24" in body["scope"]["ip_ranges"]
+
+    # The gate now PASSES for the freshly-authorized AP (incl. case-insensitive).
+    assert engagement.check_target("20:23:51:91:66:40") is True
+    assert engagement.check_target("20:23:51:91:66:40".upper()) is True
+
+    # A SCOPE_ADDED audit entry landed in the engagement's audit log.
+    assert engagement.audit_log_path is not None
+    assert "SCOPE_ADDED" in engagement.audit_log_path.read_text()
+
+    # The DB row stayed consistent (reports/list read from it) and planned_end
+    # (written at create) survived the scope merge.
+    detail = client.get(f"/api/ops/engagements/{eid}").json()["engagement"]
+    assert "20:23:51:91:66:40" in detail["scope"]["bssids"]
+    assert "jb-wifi7" in detail["scope"]["ssids"]
+    assert "10.10.0.0/24" in detail["scope"]["ip_ranges"]
+    assert "planned_end" in detail["scope"]
+
+
+def test_scope_add_dedups_existing_target(client):
+    """Re-adding an in-scope target is a no-op (deduped, case-insensitive)."""
+    from warlock.engagement import engagement
+
+    client.post(
+        "/api/ops/engagements",
+        json={
+            "name": "Dedup",
+            "authorization": "lab",
+            "targets": ["corp-lab", "aa:bb:cc:dd:ee:ff"],
+        },
+    )
+    add = client.post(
+        "/api/ops/engagements/scope/add",
+        json={"targets": ["AA:BB:CC:DD:EE:FF", "corp-lab"]},
+    )
+    assert add.status_code == 200, add.text
+    scope = add.json()["scope"]
+    assert scope["bssids"].count("aa:bb:cc:dd:ee:ff") == 1
+    assert scope["ssids"].count("corp-lab") == 1
+    assert engagement.check_target("aa:bb:cc:dd:ee:ff") is True
+
+
+def test_scope_add_rejects_placeholder_targets(client):
+    """Placeholder literals are rejected on scope/add too (400, not silently added)."""
+    client.post(
+        "/api/ops/engagements",
+        json={"name": "Guarded", "authorization": "lab", "targets": ["corp-lab"]},
+    )
+    r = client.post(
+        "/api/ops/engagements/scope/add",
+        json={"targets": ["BSSID", "  "]},
+    )
+    assert r.status_code == 400, r.text
+
+
+def test_scope_add_409_when_no_engagement(client):
+    """scope/add with no active engagement → 409 (nothing to authorize against)."""
+    r = client.post(
+        "/api/ops/engagements/scope/add",
+        json={"targets": ["jb-wifi7"]},
+    )
+    assert r.status_code == 409, r.text

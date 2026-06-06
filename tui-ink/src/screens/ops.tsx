@@ -75,6 +75,18 @@ function fmtTs(iso: string | null): string {
 
 type Tab = "active" | "new" | "history" | "audit";
 
+// Tokens that must not be submitted as actual scope targets — they are the
+// literal words from the old abstract placeholder and must never become real
+// scope entries. Case-insensitive. The backend now rejects these too, but we
+// catch client-side for a clean inline error.
+const TARGETS_DENYLIST = new Set(["ssid", "bssid", "ip/cidr", "cidr"]);
+
+/** Returns true when `raw` is blank or consists entirely of placeholder tokens. */
+export function isBlockedTargets(raw: string): boolean {
+  const tokens = raw.split(",").map(s => s.trim()).filter(Boolean);
+  return tokens.length === 0 || tokens.every(t => TARGETS_DENYLIST.has(t.toLowerCase()));
+}
+
 // ── Screen ───────────────────────────────────────────────────────────────────
 
 export function Screen() {
@@ -126,6 +138,13 @@ export function Screen() {
       return;
     }
     const targets = formTargets.split(",").map(s => s.trim()).filter(Boolean);
+    if (
+      targets.length === 0 ||
+      targets.every(t => TARGETS_DENYLIST.has(t.toLowerCase()))
+    ) {
+      setActionMsg("enter real targets (SSID / BSSID / CIDR)");
+      return;
+    }
     const dur = parseFloat(formDuration) || 4.0;
     setSubmitting(true);
     void api
@@ -335,7 +354,7 @@ export function Screen() {
                   onChange={setFormTargets}
                   onSubmit={_v => setFormField(3)}
                   focus={formField === 2}
-                  placeholder="SSID, BSSID, IP/CIDR (comma-separated)…"
+                  placeholder="e.g. HomeNet, 20:23:51:91:66:40, 192.168.0.0/24"
                 />
               </Box>
               <Box>

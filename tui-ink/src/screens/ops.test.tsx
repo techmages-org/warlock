@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { WarlockProvider, type WarlockContextValue } from "../context.js";
 import type { ApiClient } from "../lib/api.js";
 import type { EventBus } from "../lib/ws.js";
-import { Screen } from "./ops.js";
+import { Screen, isBlockedTargets } from "./ops.js";
 
 const SAFE_STATUS = {
   ok: true,
@@ -134,5 +134,53 @@ describe("Ops / Engagements screen", () => {
     await vi.waitFor(() => expect(lastFrame()).toContain("LINK ERROR"));
     expect(lastFrame()).toContain("ops error");
     unmount();
+  });
+
+});
+
+// ── isBlockedTargets unit tests ───────────────────────────────────────────────
+// These test the exported guard function directly — stdin simulation of
+// controlled TextInput is unreliable in ink-testing-library, so we test the
+// exact function that handleSubmit calls.
+
+describe("isBlockedTargets()", () => {
+  it("blocks blank input", () => {
+    expect(isBlockedTargets("")).toBe(true);
+  });
+
+  it("blocks whitespace-only input", () => {
+    expect(isBlockedTargets("   ")).toBe(true);
+  });
+
+  it("blocks exact placeholder token set", () => {
+    expect(isBlockedTargets("SSID, BSSID, IP/CIDR")).toBe(true);
+  });
+
+  it("blocks case-mixed placeholder tokens", () => {
+    expect(isBlockedTargets("Ssid, bssid, ip/cidr")).toBe(true);
+  });
+
+  it("blocks a bare 'cidr' token", () => {
+    expect(isBlockedTargets("cidr")).toBe(true);
+  });
+
+  it("passes with a real SSID + CIDR", () => {
+    expect(isBlockedTargets("HomeNet, 192.168.0.0/24")).toBe(false);
+  });
+
+  it("passes even when some tokens are denylist words, as long as not ALL", () => {
+    expect(isBlockedTargets("HomeNet, BSSID")).toBe(false);
+  });
+
+  it("passes with a single real SSID", () => {
+    expect(isBlockedTargets("CorpWifi")).toBe(false);
+  });
+
+  it("passes with a single CIDR", () => {
+    expect(isBlockedTargets("10.0.0.0/8")).toBe(false);
+  });
+
+  it("passes with a MAC address", () => {
+    expect(isBlockedTargets("aa:bb:cc:00:11:22")).toBe(false);
   });
 });
