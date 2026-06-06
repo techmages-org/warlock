@@ -237,6 +237,31 @@ export function Screen() {
     setStep("target");
   };
 
+  // Inline "add to Scope": authorize the selected/locked AP into the active
+  // engagement's allowlist without leaving the flow (POST /api/ops/engagements/
+  // scope/add). Send the SSID (omit when hidden/blank) + always the BSSID.
+  const addToScope = async (ap: AP | null | undefined) => {
+    if (!ap) {
+      setNote("no AP selected to add to scope");
+      return;
+    }
+    const targets = [ap.essid, ap.bssid].filter((t): t is string => !!t && t.trim() !== "");
+    setBusy(true);
+    try {
+      await api.post("/api/ops/engagements/scope/add", { targets });
+      setNote(`added ${ap.essid || ap.bssid} to scope ✓`);
+    } catch (e) {
+      const msg = String(e);
+      setNote(
+        msg.includes("409")
+          ? "no active engagement — start one on Operations (g e)"
+          : `add-to-scope failed: ${msg}`,
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const fire = async () => {
     const t = targetRef.current;
     if (!t) {
@@ -314,8 +339,13 @@ export function Screen() {
         if (key.upArrow) setApIdx((v) => clamp(v - 1, 0, Math.max(0, n - 1)));
         else if (key.downArrow) setApIdx((v) => clamp(v + 1, 0, Math.max(0, n - 1)));
         else if (key.return) lockTarget();
+        else if (input === "s" && !busyRef.current) {
+          const ap = apsRef.current[clamp(apIdxRef.current, 0, Math.max(0, apsRef.current.length - 1))];
+          void addToScope(ap);
+        }
       } else if (st === "target") {
         if (key.return) setStep("act");
+        else if (input === "s" && !busyRef.current) void addToScope(targetRef.current);
       } else if (st === "act") {
         if (key.upArrow) setOpIdx((v) => clamp(v - 1, 0, ACT_OPS.length - 1));
         else if (key.downArrow) setOpIdx((v) => clamp(v + 1, 0, ACT_OPS.length - 1));
@@ -421,8 +451,8 @@ export function Screen() {
 
 const HINTS: Record<StepId, string> = {
   arm: "1–5 step · ←/→ channels · a arm · d disarm",
-  recon: "1–5 step · ↑/↓ select AP · Enter lock target",
-  target: "1–5 step · Enter → ACT",
+  recon: "1–5 step · ↑/↓ select AP · Enter lock · s add-to-scope",
+  target: "1–5 step · Enter → ACT · s add-to-scope",
   act: "1–5 step · ↑/↓ op · Enter fire (gated)",
   loot: "1–5 step · ↑/↓ capture · Enter send-to-crack",
 };
