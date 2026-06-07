@@ -8,8 +8,19 @@ Obsidian vault: `Frontier Infra/Agent Control Plane (AAR)/06 - Deck Ingest, Iden
 ---
 
 ## Track A — Deck: Fluke-grade network diagnostics *(ACTIVE)*
-A0 audit ✅ (this doc set) → A1 wired LinkRunner-class → A3 wireless AirCheck-class → A4 one-button
-report → A5 WaRL0c playbooks. A2 (hardware: TDR/PoE/spectrum) = BOM + SW-hooks spec only.
+A0 audit ✅ → **A1 wired + wireless ✅ (verified live on the deck)** → A3 wireless AirCheck-class →
+**A6 Wi-Fi walk-test signal tracker** → A4 one-button report → A5 WaRL0c playbooks.
+A2 (hardware: TDR/PoE/RF-spectrum + optional USB-GbE 2nd port) = BOM + SW-hooks spec only.
+
+- **A6 — Wi-Fi walk-test signal tracker (heatmap / dead-zone finder).** GOAL: walk a space and see
+  where APs are strong, weak, or dead. ACCEPTANCE: continuous per-AP RSSI sampling over time
+  (`iw scan` / nl80211) with a live trace; classify **hot / warm / cold / dead** per sample against
+  thresholds; per-BSSID min/max/avg + "last seen" so you can spot where an AP drops out; mark
+  manual position tags (room/waypoint) for an indoor survey, and optionally bind GPS fixes (the deck
+  has u-blox + 1-PPS) for an outdoor walk; export the trace for the A4 report + an eventual heatmap
+  overlay. AirCheck/Ekahau-style. Surfaced in the UI; ties into A3 + `wireless_ids`. NON-GOALS:
+  full floor-plan image calibration / Ekahau-grade interpolation (later); needs a portable walk —
+  verify on the deck by walking it around a space.
 
 ---
 

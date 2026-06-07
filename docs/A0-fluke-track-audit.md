@@ -59,7 +59,8 @@ Interfaces: `eth0` **NO-CARRIER** (no cable) · `wlan0` UP (active) · `wlan1` D
 
 ## 4. Sized plan — A1–A5 (additive; one new `netdiag` module + a wireless analyzer)
 
-- **A1 — `netdiag` module (LinkRunner-class), ~1 module + API + TUI/web tile.**
+- **A1 — `netdiag` module (LinkRunner-class) — ✅ DONE, verified live on the deck** (wired 1000/Full
+  + LLDP nearest-switch port_4 + one-button PASS; wireless PASS). Commit `a8fe0a9`. (TUI/web tile = remaining polish.)
   - link: `ethtool eth0` / `/sys/class/net/*/speed,duplex,carrier`; CDP/LLDP: `lldpd` + `lldpctl -f json`
     (passive listen, ~30s); VLAN: lldp VLAN TLV + tagged-probe; DHCP health: `nmap --script
     broadcast-dhcp-discover` / `nping --dhcp`; DNS/gateway: resolve + ping default route; ping/TCP:
@@ -70,8 +71,14 @@ Interfaces: `eth0` **NO-CARRIER** (no cable) · `wlan0` UP (active) · `wlan1` D
   map, RSSI, utilization, roam test; surface in UI + cross-link `wireless_ids`. Verifiable on wlan0/wlan1.
 - **A4 — one-button report:** HTML (+ print-to-PDF) site-survey/network-health from a netdiag+wireless
   run; structured (JSON core) so the AAR report generator (Track B) can consume it.
-- **A5 — WaRL0c playbooks:** register "run wired diag", "run wireless survey", "site health report"
-  as operator actions; narrate the PASS/FAIL + top findings.
+- **A6 — Wi-Fi walk-test signal tracker (heatmap / dead-zone finder)** *(new, requested 2026-06-07)*:
+  walk a space, see AP hot/warm/cold/dead spots. Continuous per-BSSID RSSI sampling (`iw scan` /
+  nl80211) with a live trace + min/max/avg/last-seen per AP; threshold-classified hot→dead; manual
+  position/room tags for indoor surveys + optional GPS bind (deck has u-blox/1-PPS) for outdoor;
+  export the trace to feed A4 + an eventual heatmap overlay. AirCheck/Ekahau-style; ties into A3 +
+  `wireless_ids`. Verify by walking the deck around a space. (Not floor-plan-calibrated interpolation — later.)
+- **A5 — WaRL0c playbooks:** register "run wired diag", "run wireless survey", "walk-test", "site
+  health report" as operator actions; narrate the PASS/FAIL + top findings.
 
 **Build order:** install tools → A1 module + verify wlan-side → (cable) verify wired → A3 → A4 → A5,
 each checkpointed on the real deck.
