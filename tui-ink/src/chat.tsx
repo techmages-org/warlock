@@ -22,7 +22,12 @@ function main() {
   const runner = createAgentRunner({ api, config: agentCfg });
 
   const { waitUntilExit } = render(
-    <ChatApp runner={runner} model={agentCfg.model} missing={missingConfig(agentCfg)} />,
+    <ChatApp
+      runner={runner}
+      provider={agentCfg.provider}
+      model={agentCfg.model}
+      missing={missingConfig(agentCfg)}
+    />,
   );
 
   void waitUntilExit().then(() => process.exit(0));
