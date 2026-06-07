@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { apiGet, apiPost } from "../lib/api";
+import { openEventBus } from "../lib/ws";
 import { BigValue, ModuleHeader, StatusLED, Tile } from "../components/hud";
 import { AdsbMap } from "../components/AdsbMap";
 
@@ -54,9 +55,18 @@ export function Sdr() {
   const [events, setEvents] = useState<Rtl433Event[]>([]);
   const [note, setNote] = useState("");
 
+  const tabRef = useRef(tab);
+  tabRef.current = tab;
+
   const refresh = useCallback(async () => {
     try {
       setStatus(await apiGet<SdrStatus>("/api/sdr/status"));
+    } catch { /**/ }
+  }, []);
+
+  const loadAdsb = useCallback(async () => {
+    try {
+      setAdsb(await apiGet<AdsbResp>("/api/sdr/adsb/aircraft"));
     } catch { /**/ }
   }, []);
 
@@ -66,6 +76,25 @@ export function Sdr() {
     return () => clearInterval(id);
   }, [refresh]);
 
+  // Live SDR over the WS bus. Each event is a freshness trigger:
+  //   • sdr.adsb → pull the FULL enriched aircraft list (/api/sdr/adsb/aircraft,
+  //     W5's 43-field set) so the intel popups never degrade to the bus event's
+  //     "summary" payload — using the event's own array directly would let a
+  //     reduced summary stomp the enriched poll data and flicker the card.
+  //   • sdr.status → re-pull the canonical device status.
+  // This is resilient whether the event payload is enriched or reduced, and
+  // whether events arrive at all — the interval polls below remain the fallback.
+  useEffect(() => {
+    const stop = openEventBus((e) => {
+      if (e.name === "sdr.status") {
+        refresh();
+      } else if (e.name === "sdr.adsb") {
+        if (tabRef.current === "adsb") loadAdsb();
+      }
+    });
+    return stop;
+  }, [refresh, loadAdsb]);
+
   useEffect(() => {
     apiGet<{ presets: Preset[] }>("/api/sdr/presets")
       .then((d) => setPresets(d.presets || []))
@@ -74,17 +103,10 @@ export function Sdr() {
 
   useEffect(() => {
     if (tab !== "adsb") return;
-    let alive = true;
-    const load = async () => {
-      try {
-        const d = await apiGet<AdsbResp>("/api/sdr/adsb/aircraft");
-        if (alive) setAdsb(d);
-      } catch { /**/ }
-    };
-    load();
-    const id = setInterval(load, 2000);
-    return () => { alive = false; clearInterval(id); };
-  }, [tab]);
+    loadAdsb();
+    const id = setInterval(loadAdsb, 2000);
+    return () => clearInterval(id);
+  }, [tab, loadAdsb]);
 
   useEffect(() => {
     if (tab !== "rtl433") return;

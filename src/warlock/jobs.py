@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import shlex
 from collections.abc import Iterable
 from datetime import datetime
@@ -13,9 +14,25 @@ from warlock.db import session_scope
 from warlock.engagement import engagement
 from warlock.models import AuditEntry, Job
 
+log = logging.getLogger("warlock.jobs")
+
 
 def _sha256(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+def _emit_aar(kind: str, command: str, target: str, note: str, outcome: str) -> None:
+    """Best-effort: emit a signed AAR proof for this audit event. Lazy-imported +
+    fully guarded so a missing dep or signing error can NEVER break the audit
+    write or the job submission."""
+    try:
+        from warlock import aar
+
+        aar.safe_emit_for_audit(
+            kind=kind, command=command, target=target, note=note, outcome=outcome
+        )
+    except Exception:  # noqa: BLE001 — AAR is additive; the audit row already landed
+        log.warning("AAR emit hook failed (non-fatal) for %s", kind, exc_info=True)
 
 
 class JobRunner:
@@ -77,6 +94,7 @@ class JobRunner:
                         outcome="submitted",
                     )
                 )
+            _emit_aar("job.submit", command, target, note, "submitted")
 
         task = asyncio.create_task(self._run(job_id, argv))
         self._tasks[job_id] = task
@@ -156,6 +174,7 @@ class JobRunner:
                     outcome="refused",
                 )
             )
+        _emit_aar("scope.violation", command, target, f"{reason}: {note}", "refused")
         await events.bus.publish(
             events.ALERT_FIRED,
             {"severity": "warning", "source": "engagement", "message": f"scope violation: {reason}"},

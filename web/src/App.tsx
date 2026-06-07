@@ -13,6 +13,7 @@ import { Mesh } from "./pages/Mesh";
 import { NetRecon } from "./pages/NetRecon";
 import { Ops } from "./pages/Ops";
 import { Sdr } from "./pages/Sdr";
+import { SdrOffensive } from "./pages/SdrOffensive";
 import { Stub } from "./pages/Stub";
 import { System } from "./pages/System";
 import { WifiRecon } from "./pages/WifiRecon";
@@ -21,7 +22,6 @@ import { Wireless } from "./pages/Wireless";
 // Modules still rendered via the fallback StubPanel (no dedicated page yet).
 const STUBBED = [
   "wifi_offensive",
-  "sdr_offensive",
   "esp32_companion",
 ];
 
@@ -103,6 +103,8 @@ export default function App() {
           <Route path="/wireless" element={<Wireless />} />
           <Route path="/crack" element={<Crack />} />
           <Route path="/sdr" element={<Sdr />} />
+          <Route path="/sdr_offensive" element={<SdrOffensive />} />
+          <Route path="/sdr-offensive" element={<SdrOffensive />} />
           <Route path="/net_recon" element={<NetRecon />} />
           <Route path="/net-recon" element={<NetRecon />} />
           <Route path="/wireless_ids" element={<Blue />} />

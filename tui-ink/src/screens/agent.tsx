@@ -29,7 +29,8 @@ export function Screen() {
           <Text color={TEXT.dim}>) and run:</Text>
         </Box>
         <Text color={COLORS.mint}>  warlock-chat</Text>
-        <Text color={TEXT.dim}>Same read-only brain, grounded in live deck state.</Text>
+        <Text color={TEXT.dim}>Same brain — reads live state and drives in-scope ops</Text>
+        <Text color={TEXT.dim}>under an active engagement (the gate authorizes each).</Text>
       </Tile>
     </Box>
   );

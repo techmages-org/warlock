@@ -29,6 +29,7 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, HTTPException
 
+from warlock import events
 from warlock.modules._base import ModuleBase
 
 log = logging.getLogger("warlock.sdr")
@@ -277,6 +278,111 @@ async def _fetch_readsb_aircraft() -> dict[str, Any]:
         raise HTTPException(502, f"readsb fetch failed: {e}") from e
 
 
+# --------------------------------------------------------------------------- #
+# Status payload — shared by GET /status AND the SDR-over-WS bus emitter so both
+# surface the IDENTICAL device snapshot. Pure/sync; it shells out (rtl_test /
+# systemctl), so async callers wrap it in asyncio.to_thread.
+# --------------------------------------------------------------------------- #
+def _status_payload() -> dict[str, Any]:
+    probe = _rtl_test_probe()
+    readsb_active = _systemctl_is_active("readsb")
+    rtl433_active = _rtl433_is_running()
+    return {
+        "ok": True,
+        "rtl_sdr_detected": bool(probe.get("detected") or probe.get("usb_present")),
+        "tuner": probe.get("tuner"),
+        "device_count": probe.get("device_count", 0),
+        "usb_present": probe.get("usb_present"),
+        "blacklist": _blacklist_state(),
+        "readsb": {"active": readsb_active},
+        "rtl_433": {"active": rtl433_active, "jsonl": RTL433_JSONL.as_posix()},
+        "lock": {"holder": _lock_holder()},
+        "probe_raw": probe.get("raw"),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# SDR-over-WS live bus. An on_startup background loop publishes a compact
+# aircraft summary (sdr.adsb) + the device status (sdr.status) every ~3s so the
+# web map + Ink SDR screen get push updates instead of polling. The loop never
+# blocks the event loop (async readsb fetch; status probe in a worker thread) and
+# degrades gracefully — readsb down/feed unreachable → an `unavailable`-shaped
+# adsb payload, never an exception.
+# --------------------------------------------------------------------------- #
+SDR_BUS_INTERVAL_S = 3.0
+SDR_BUS_MAX_AIRCRAFT = 50  # cap the per-tick bus payload (busy feeds carry 100s)
+
+
+def _compact_aircraft(a: dict[str, Any]) -> dict[str, Any]:
+    """A small, bus-friendly subset of a readsb aircraft row. Full detail still
+    lives on GET /adsb/aircraft; all .get() — readsb omits any field it can't
+    decode, so every key is optional and this never raises."""
+    return {
+        "icao": a.get("hex"),
+        "callsign": (a.get("flight") or "").strip() or None,
+        "lat": a.get("lat"),
+        "lon": a.get("lon"),
+        "altitude_ft": a.get("alt_baro") or a.get("altitude"),
+        "speed_kt": a.get("gs") or a.get("speed"),
+        "heading": a.get("track"),
+        "squawk": a.get("squawk"),
+        "rssi": a.get("rssi"),
+        "seen_s": a.get("seen"),
+    }
+
+
+async def _adsb_bus_payload(readsb_active: bool) -> dict[str, Any]:
+    """Build the sdr.adsb bus payload. Returns an `unavailable`-shaped dict
+    (ok=False + reason, empty aircraft) when readsb is inactive or the feed can't
+    be reached — never raises."""
+    if not readsb_active:
+        return {"ok": False, "reason": "readsb inactive", "count": 0,
+                "with_position": 0, "truncated": False, "aircraft": []}
+    try:
+        data = await _fetch_readsb_aircraft()
+    except HTTPException as e:
+        return {"ok": False, "reason": e.detail, "count": 0,
+                "with_position": 0, "truncated": False, "aircraft": []}
+    craft = data.get("aircraft") or []
+    rows = [_compact_aircraft(a) for a in craft]
+    with_pos = sum(1 for r in rows if r["lat"] is not None and r["lon"] is not None)
+    return {
+        "ok": True,
+        "now": data.get("now"),
+        "count": len(rows),
+        "with_position": with_pos,
+        "truncated": len(rows) > SDR_BUS_MAX_AIRCRAFT,
+        "aircraft": rows[:SDR_BUS_MAX_AIRCRAFT],
+    }
+
+
+async def _emit_once() -> dict[str, dict[str, Any]]:
+    """Publish one sdr.status + sdr.adsb pair to the event bus and return both
+    payloads (handy for tests). The status probe shells out, so it runs in a
+    worker thread to keep the event loop responsive."""
+    status = await asyncio.to_thread(_status_payload)
+    readsb_active = bool((status.get("readsb") or {}).get("active"))
+    adsb = await _adsb_bus_payload(readsb_active)
+    await events.bus.publish(events.SDR_STATUS, status)
+    await events.bus.publish(events.SDR_ADSB, adsb)
+    return {"status": status, "adsb": adsb}
+
+
+async def _sdr_bus_loop(interval: float = SDR_BUS_INTERVAL_S) -> None:
+    """Background loop: emit the SDR snapshot every ``interval`` seconds until
+    cancelled. Sleeps FIRST so a short-lived app (e.g. a test client started and
+    stopped within one interval) never fires a tick. One bad tick is logged and
+    swallowed so the loop survives a transient feed/probe failure."""
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            await _emit_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            log.exception("sdr bus tick failed")
+
+
 PRESETS = [
     {"id": "fm_bcast", "label": "FM Broadcast", "freq_mhz": 98.5, "mode": "WFM", "bw_khz": 200},
     {"id": "aviation_am", "label": "Aviation AM", "freq_mhz": 118.1, "mode": "AM", "bw_khz": 25},
@@ -295,7 +401,24 @@ class Module(ModuleBase):
     icon = "∿"
     requires_engagement = False
 
+    def __init__(self) -> None:
+        # Handle to the SDR-over-WS background emitter task (started on_startup,
+        # cancelled on_shutdown). None until the loop is running.
+        self._bus_task: asyncio.Task | None = None
+
+    async def on_startup(self) -> None:
+        # Start the live bus emitter once (idempotent across hot reloads).
+        if self._bus_task is None or self._bus_task.done():
+            self._bus_task = asyncio.create_task(_sdr_bus_loop())
+
     async def on_shutdown(self) -> None:
+        if self._bus_task is not None:
+            self._bus_task.cancel()
+            try:
+                await self._bus_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+            self._bus_task = None
         if _rtl433_is_running():
             _rtl433_stop()
 
@@ -304,21 +427,7 @@ class Module(ModuleBase):
 
         @r.get("/status")
         def status() -> dict[str, Any]:
-            probe = _rtl_test_probe()
-            readsb_active = _systemctl_is_active("readsb")
-            rtl433_active = _rtl433_is_running()
-            return {
-                "ok": True,
-                "rtl_sdr_detected": bool(probe.get("detected") or probe.get("usb_present")),
-                "tuner": probe.get("tuner"),
-                "device_count": probe.get("device_count", 0),
-                "usb_present": probe.get("usb_present"),
-                "blacklist": _blacklist_state(),
-                "readsb": {"active": readsb_active},
-                "rtl_433": {"active": rtl433_active, "jsonl": RTL433_JSONL.as_posix()},
-                "lock": {"holder": _lock_holder()},
-                "probe_raw": probe.get("raw"),
-            }
+            return _status_payload()
 
         @r.get("/adsb/aircraft")
         async def adsb_aircraft() -> dict[str, Any]:

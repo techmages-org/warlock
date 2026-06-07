@@ -16,16 +16,38 @@ class Settings(BaseSettings):
     port: int = Field(default=7777, description="HTTP port")
     web_password: str = Field(default="warlock", description="Basic-auth password for /web + /api")
     web_username: str = Field(default="warlock", description="Basic-auth username")
-    # Opt-in HTTP Basic auth on the /ws handshake. DEFAULT OFF: the browser
-    # WebSocket API cannot send an Authorization header, so enforcing by default
-    # would 403 the web event bus (live engagement/alert updates) into a reconnect
-    # loop. The TUI client DOES send the header, so flip this ON (WARLOCK_WS_AUTH=1)
-    # once the web side has a header-free auth path (token/cookie). Env: WARLOCK_WS_AUTH.
+    # Auth on the /ws handshake. DEFAULT ON now that the web client has a
+    # header-free path: it fetches a short-lived signed token from
+    # GET /api/ws-token (behind Basic auth) and passes it as ?token=… on the
+    # upgrade. When enforced (and a password is set) the handshake is accepted
+    # with EITHER a valid Basic Authorization header (the TUI client) OR a valid
+    # ?token=… query param (the browser). Set WARLOCK_WS_AUTH=0 to disable (e.g.
+    # a trusted LAN deck running an old web build with no token fetch).
     web_ws_auth: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("WARLOCK_WS_AUTH", "web_ws_auth"),
-        description="Enforce Basic auth on the /ws handshake (opt-in; default OFF to avoid web regression)",
+        description="Enforce auth on the /ws handshake (Basic header OR ?token=; default ON)",
     )
+    # --- AAR (Agent Attestation Record) — Ed25519-signed audit proofs --------
+    # Emit every gated audit row ALSO as a signed, did:web-identified AAR. On by
+    # default; set WARLOCK_AAR=0 to disable. Signing is best-effort + fail-safe,
+    # so a signing error never breaks the underlying audit write.
+    aar_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("WARLOCK_AAR", "aar_enabled"),
+        description="Emit Ed25519-signed AAR proofs alongside audit rows (default ON)",
+    )
+    # File keystore dir for the Ed25519 signing key (0600, service-user owned).
+    # Config-driven: production sets WARLOCK_AAR_KEYS_DIR=/opt/warlock/keys; when
+    # unset it defaults to <data>/keys so tests/dev stay hermetic under WARLOCK_DATA.
+    aar_keys_dir: Path | None = Field(default=None, description="Ed25519 keystore dir (default <data>/keys)")
+    # did:web identity. subject = the deck; principal = the org that answers for it.
+    aar_did_base: str = Field(default="did:web:decks.titaniumcomputing.com", description="did:web base for the deck subject")
+    aar_deck_id: str = Field(default="warlock-cm5-01", description="deck id suffix → subject = <did_base>:<deck_id>")
+    aar_principal_did: str = Field(default="did:web:titaniumcomputing.com", description="principal DID (the authorizing org)")
+    # Transparency-log host for L3 pinning (stored for later; NOT contacted at L1 sign time).
+    aar_log_host: str = Field(default="log.titaniumcomputing.com", description="transparency-log host (L3, config only)")
+
     mesh_host: str = Field(default="127.0.0.1")
     mesh_port: int = Field(default=4403)
     gpsd_host: str = Field(default="127.0.0.1")
@@ -37,6 +59,21 @@ class Settings(BaseSettings):
     def db_url(self) -> str:
         self.data.mkdir(parents=True, exist_ok=True)
         return f"sqlite:///{self.data / 'warlock.db'}"
+
+    @property
+    def aar_subject_did(self) -> str:
+        """The deck's subject DID: ``<aar_did_base>:<aar_deck_id>``."""
+        return f"{self.aar_did_base}:{self.aar_deck_id}"
+
+    def aar_keystore_dir(self) -> Path:
+        """Effective keystore dir — explicit ``aar_keys_dir`` or ``<data>/keys``."""
+        return self.aar_keys_dir if self.aar_keys_dir is not None else (self.data / "keys")
+
+    def aar_dir(self) -> Path:
+        """Root for AAR records / preimages / chain state (under the data root)."""
+        p = self.data / "aar"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
 
     def engagement_dir(self) -> Path:
         p = self.data / "engagements"
