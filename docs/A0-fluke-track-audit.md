@@ -46,17 +46,14 @@ Interfaces: `eth0` **NO-CARRIER** (no cable) · `wlan0` UP (active) · `wlan1` D
 
 ## 3. ⛔ Blockers (operator) — surfaced per the contract tripwire
 
-1. **No usable wired Ethernet port — RESOLVED as a HARDWARE FINDING (2026-06-07).** `eth0` is the
-   CM5 on-SoC MAC (driver `macb`, `bus-info 1f00100000.ethernet`) but it has **no carrier, ever, and
-   advertises only 10baseT** = a MAC with **no functional PHY/RJ45 wired to it** on this uConsole.
-   Patching a cable into a switch does nothing for it (verified: carrier stays 0 after `ip link set
-   eth0 up`). No USB-Ethernet adapter attached (only USB device = the RTL-SDR `0bda:2838`). `netdiag`
-   *correctly* reports `carrier:false / link_detected:false` — honest, not a bug.
-   → **A2 BOM item:** a **USB-Ethernet adapter (RTL8153 / AX88179-class, USB3 GbE)**. Plug it in → new
-   iface (cdc_ether/r8152/ax88) → `netdiag` tests real link speed/duplex + **LLDP nearest-switch +
-   port + VLAN** immediately. Until then the wired-only checks are **built + correct but unverifiable
-   on this hardware**. Wlan-side checks (gateway/DHCP/DNS/ping/path-MTU/latency/jitter/iperf3) verified
-   live over `wlan0`.
+1. **Wired Ethernet — VERIFIED (2026-06-07).** `eth0` IS a real CM5 on-SoC GbE port (driver `macb`).
+   The initial "no carrier / 10baseT-only" read was a **bad cable seating** — with no link the PHY
+   advertises only 10baseT, which I over-read as "no PHY" (corrected). After re-seating, `eth0` is
+   **1000 Mb/s Full**, took DHCP `192.168.100.84/24`, and `netdiag` verified link speed/duplex +
+   **LLDP nearest-switch** (chassis `8C:86:DD:C4:A7:1C`, `port_4`) live + one-button health PASS
+   (gateway 0% loss / 0.32 ms). **A1 wired is fully verified on the deck.** VLAN showed `null` (this
+   switch didn't send the LLDP VLAN TLV — handled gracefully). A USB-Ethernet adapter remains an
+   *optional* A2 add (a 2nd wired port / multi-segment testing), not a requirement.
 2. **Tool install consent.** Confirm `sudo apt install ethtool lldpd iw mtr-tiny dnsutils arp-scan`
    on the deck (contract-named tools; reversible). Proceeding under autonomy unless told otherwise.
 
