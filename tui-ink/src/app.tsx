@@ -124,16 +124,6 @@ export function App() {
         }
         return;
       }
-      // The Agent chat screen owns the keyboard for free-text input: suppress
-      // the global single-key shortcuts (g chord / q quit / ? help) so the
-      // operator can type those characters. Esc returns to the dashboard;
-      // Ctrl+C still quits. Scoped to the agent screen only — every other
-      // screen keeps its existing key behaviour.
-      if (activeId === "agent") {
-        if (key.escape) goto("dashboard");
-        else if (key.ctrl && input === "c") exit();
-        return;
-      }
       if (key.ctrl && input === "k") {
         setHelpOpen(false);
         setKillArmed(true);
