@@ -30,7 +30,7 @@ import { Banner, Capabilities } from "../components/Banner.js";
 import { BrailleSpinner } from "../components/BrailleSpinner.js";
 import { Markdown } from "../components/Markdown.js";
 import { SlashMenu, type SlashCommand } from "../components/SlashMenu.js";
-import type { AgentRunner } from "../lib/agent.js";
+import { READ_ENDPOINTS, type AgentRunner } from "../lib/agent.js";
 import { COLORS, TEXT } from "../lib/theme.js";
 
 export interface ChatAppProps {
@@ -170,7 +170,8 @@ export function ChatApp({ runner, provider = "", model, version = "0.1.0", missi
       return;
     }
     if (cmd === "/tools") {
-      setLog((l) => [...l, { id: nextId(), kind: "welcome" }]);
+      const toolList = READ_ENDPOINTS.map((e) => `- \`${e.name}\` — ${e.description}`).join("\n");
+      pushInfo("tools (18 read-only)", toolList);
       return;
     }
     if (cmd === "/model") {

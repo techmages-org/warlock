@@ -20,6 +20,7 @@ import tempfile
 os.environ["WARLOCK_DATA"] = tempfile.mkdtemp(prefix="warlock-wids-")
 os.environ["WARLOCK_WEB_PASSWORD"] = ""
 
+import asyncio  # noqa: E402
 import subprocess  # noqa: E402
 import sys  # noqa: E402
 from unittest.mock import AsyncMock, Mock  # noqa: E402
@@ -155,21 +156,24 @@ def test_classify_alerts_deauth_flood_vs_generic():
 
 def test_fetch_alerts_unwraps_both_shapes(monkeypatch):
     # _fetch_alerts must handle both {kismet.alert.list: [...]} and bare-list shapes.
+    # The kismet REST helpers are async now (httpx.AsyncClient) — mock accordingly.
     monkeypatch.setattr(
         wi, "_kismet_get_json",
-        lambda path: {"kismet.alert.list": [{"kismet.alert.header": "DEAUTHFLOOD"}]},
+        AsyncMock(return_value={"kismet.alert.list": [{"kismet.alert.header": "DEAUTHFLOOD"}]}),
     )
-    assert wi._fetch_alerts() == [{"kismet.alert.header": "DEAUTHFLOOD"}]
-    monkeypatch.setattr(wi, "_kismet_get_json", lambda path: [{"kismet.alert.header": "X"}])
-    assert wi._fetch_alerts() == [{"kismet.alert.header": "X"}]
+    assert asyncio.run(wi._fetch_alerts()) == [{"kismet.alert.header": "DEAUTHFLOOD"}]
+    monkeypatch.setattr(
+        wi, "_kismet_get_json", AsyncMock(return_value=[{"kismet.alert.header": "X"}])
+    )
+    assert asyncio.run(wi._fetch_alerts()) == [{"kismet.alert.header": "X"}]
 
 
 def test_fetch_devices_filters_non_dicts(monkeypatch):
     monkeypatch.setattr(
         wi, "_kismet_post_json",
-        lambda path, payload: [{"mac": "aa"}, "junk", None, {"mac": "bb"}],
+        AsyncMock(return_value=[{"mac": "aa"}, "junk", None, {"mac": "bb"}]),
     )
-    assert wi._fetch_devices() == [{"mac": "aa"}, {"mac": "bb"}]
+    assert asyncio.run(wi._fetch_devices()) == [{"mac": "aa"}, {"mac": "bb"}]
 
 
 # --------------------------------------------------------------------------- #
@@ -209,11 +213,11 @@ def test_status_endpoint_idle(client, monkeypatch):
 def test_detections_endpoint(client, monkeypatch):
     monkeypatch.setattr(wi, "_is_running", lambda: True)
     monkeypatch.setattr(wi, "_read_allowlist", lambda: {"ssids": ["CorpNet"], "bssids": ["aa:bb:cc:00:00:01"]})
-    monkeypatch.setattr(wi, "_fetch_devices", lambda: _DEVS)
-    monkeypatch.setattr(wi, "_fetch_alerts", lambda: [
+    monkeypatch.setattr(wi, "_fetch_devices", AsyncMock(return_value=_DEVS))
+    monkeypatch.setattr(wi, "_fetch_alerts", AsyncMock(return_value=[
         {"kismet.alert.header": "DEAUTHFLOOD", "kismet.alert.text": "flood",
          "kismet.alert.transmitter_mac": "DE:AD:BE:EF:00:99"},
-    ])
+    ]))
     r = client.get("/api/wireless_ids/detections")
     assert r.status_code == 200
     body = r.json()
@@ -311,8 +315,8 @@ def _mock_detections_world(monkeypatch, *, devices, alerts):
         wi, "_read_allowlist",
         lambda: {"ssids": ["CorpNet"], "bssids": ["aa:bb:cc:00:00:01"]},
     )
-    monkeypatch.setattr(wi, "_fetch_devices", lambda: devices)
-    monkeypatch.setattr(wi, "_fetch_alerts", lambda: alerts)
+    monkeypatch.setattr(wi, "_fetch_devices", AsyncMock(return_value=devices))
+    monkeypatch.setattr(wi, "_fetch_alerts", AsyncMock(return_value=alerts))
     pub = AsyncMock()
     monkeypatch.setattr(wi.events.bus, "publish", pub)
     return pub

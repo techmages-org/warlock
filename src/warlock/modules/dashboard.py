@@ -226,6 +226,31 @@ class Module(ModuleBase):
             load1, load5, load15 = os.getloadavg()
             du = psutil.disk_usage("/")
             mem = psutil.virtual_memory()
+            _tc = _read_cpu_temp_c()
+            # The five subprocess probes are synchronous (subprocess.run with 2 s
+            # timeouts) — calling them inline on the event loop blocked ALL other
+            # requests for up to ~10 s per poll. Offload each to a worker thread
+            # and run them CONCURRENTLY alongside the two already-async probes so a
+            # dashboard poll never stalls the loop and finishes in ~one timeout,
+            # not the sum. Each helper swallows its own exceptions and returns a
+            # safe default, so gather never raises. Return shapes are unchanged.
+            (
+                throttled,
+                rtc_drift,
+                chrony,
+                nmcli,
+                sdr,
+                gps,
+                mesh_count,
+            ) = await asyncio.gather(
+                asyncio.to_thread(_vcgencmd_throttled),
+                asyncio.to_thread(_rtc_drift_seconds),
+                asyncio.to_thread(_chrony_tracking),
+                asyncio.to_thread(_nmcli_active),
+                asyncio.to_thread(_sdr_devices),
+                _gpsd_fix(),
+                _mesh_node_count(),
+            )
             payload = {
                 "hostname": socket.gethostname(),
                 "now": datetime.utcnow().isoformat(),
@@ -241,17 +266,17 @@ class Module(ModuleBase):
                     "available_mb": round(mem.available / 1_048_576, 1),
                     "percent": mem.percent,
                 },
-                "temp_c": (_tc := _read_cpu_temp_c()),
+                "temp_c": _tc,
                 "temp_f": (None if _tc is None else round(_tc * 9 / 5 + 32, 1)),
-                "throttled": _vcgencmd_throttled(),
+                "throttled": throttled,
                 "disk_root_mb_free": round(du.free / 1_048_576, 1),
                 "disk_root_percent": du.percent,
-                "rtc_drift_s": _rtc_drift_seconds(),
-                "chrony": _chrony_tracking(),
-                "gps": await _gpsd_fix(),
-                "nmcli_active": _nmcli_active(),
-                "mesh_node_count": await _mesh_node_count(),
-                "sdr": _sdr_devices(),
+                "rtc_drift_s": rtc_drift,
+                "chrony": chrony,
+                "gps": gps,
+                "nmcli_active": nmcli,
+                "mesh_node_count": mesh_count,
+                "sdr": sdr,
                 "engagement": engagement.status(),
             }
             return payload

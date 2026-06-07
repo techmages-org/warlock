@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import clsx from "clsx";
 import { EngagementBanner, HudBarBottom, HudBarTop } from "./components/hud";
 import { apiGet, type ModuleInfo } from "./lib/api";
+import { Audio } from "./pages/Audio";
 import { Audit } from "./pages/Audit";
 import { Blue } from "./pages/Blue";
 import { Crack } from "./pages/Crack";
@@ -108,6 +109,7 @@ export default function App() {
           <Route path="/blue" element={<Blue />} />
           <Route path="/server_audit" element={<Audit />} />
           <Route path="/audit" element={<Audit />} />
+          <Route path="/audio" element={<Audio />} />
           <Route path="/system" element={<System />} />
           {STUBBED.map((mid) => (
             <Route key={mid} path={`/${mid}`} element={<Stub moduleId={mid} />} />

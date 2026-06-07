@@ -141,17 +141,20 @@ def _kismet_auth() -> tuple[str, str]:
     return (KISMET_USER, KISMET_PASS)
 
 
-def _kismet_get_json(path: str) -> Any:
-    with httpx.Client(timeout=KISMET_TIMEOUT) as c:
-        r = c.get(_kismet_base_url() + path, auth=_kismet_auth())
+async def _kismet_get_json(path: str) -> Any:
+    # AsyncClient (not httpx.Client) so a kismet REST call NEVER blocks the event
+    # loop — a slow/hung kismet would otherwise freeze every other request
+    # (including the killswitch) for up to KISMET_TIMEOUT seconds per call.
+    async with httpx.AsyncClient(timeout=KISMET_TIMEOUT) as c:
+        r = await c.get(_kismet_base_url() + path, auth=_kismet_auth())
         r.raise_for_status()
         return r.json()
 
 
-def _kismet_post_json(path: str, payload: dict[str, Any]) -> Any:
+async def _kismet_post_json(path: str, payload: dict[str, Any]) -> Any:
     # Kismet accepts a form-encoded ``json`` POST variable for field-simplified queries.
-    with httpx.Client(timeout=KISMET_TIMEOUT) as c:
-        r = c.post(
+    async with httpx.AsyncClient(timeout=KISMET_TIMEOUT) as c:
+        r = await c.post(
             _kismet_base_url() + path,
             auth=_kismet_auth(),
             data={"json": json.dumps(payload)},
@@ -160,9 +163,9 @@ def _kismet_post_json(path: str, payload: dict[str, Any]) -> Any:
         return r.json()
 
 
-def _fetch_devices() -> list[dict[str, Any]]:
+async def _fetch_devices() -> list[dict[str, Any]]:
     """Return kismet devices (field-simplified). Raises on REST failure."""
-    data = _kismet_post_json("/devices/views/all/devices.json", {"fields": DEVICE_FIELDS})
+    data = await _kismet_post_json("/devices/views/all/devices.json", {"fields": DEVICE_FIELDS})
     if isinstance(data, list):
         return [d for d in data if isinstance(d, dict)]
     if isinstance(data, dict):
@@ -173,9 +176,9 @@ def _fetch_devices() -> list[dict[str, Any]]:
     return []
 
 
-def _fetch_alerts() -> list[dict[str, Any]]:
+async def _fetch_alerts() -> list[dict[str, Any]]:
     """Return kismet alerts. Raises on REST failure."""
-    data = _kismet_get_json("/alerts/all_alerts.json")
+    data = await _kismet_get_json("/alerts/all_alerts.json")
     if isinstance(data, dict):
         lst = data.get("kismet.alert.list")
         if isinstance(lst, list):
@@ -470,9 +473,9 @@ def _iface_ready(iface: str) -> bool:
     return _iface_exists(iface) and _iface_is_up(iface)
 
 
-def _kismet_reachable() -> bool:
+async def _kismet_reachable() -> bool:
     try:
-        _kismet_get_json("/system/status.json")
+        await _kismet_get_json("/system/status.json")
         return True
     except Exception:  # noqa: BLE001
         return False
@@ -645,7 +648,7 @@ class Module(ModuleBase):
         r = APIRouter(prefix="/api/wireless_ids", tags=[self.id])
 
         @r.get("/status")
-        def status() -> dict[str, Any]:
+        async def status() -> dict[str, Any]:
             running = _is_running()
             st = _read_state() if running else {}
             uptime = None
@@ -663,7 +666,7 @@ class Module(ModuleBase):
                 "running": running,
                 "iface": st.get("iface"),
                 "channels": st.get("channels"),
-                "kismet_reachable": _kismet_reachable() if running else False,
+                "kismet_reachable": (await _kismet_reachable()) if running else False,
                 "uptime_s": uptime,
                 "started_at": started,
                 "allowlist": {"ssids": len(allow["ssids"]), "bssids": len(allow["bssids"])},
@@ -688,12 +691,12 @@ class Module(ModuleBase):
             dets: list[dict[str, Any]] = []
             errors: list[str] = []
             try:
-                devices = _fetch_devices()
+                devices = await _fetch_devices()
                 dets.extend(classify_devices(devices, allow["ssids"], allow["bssids"]))
             except Exception as e:  # noqa: BLE001
                 errors.append(f"devices: {e}")
             try:
-                alerts = _fetch_alerts()
+                alerts = await _fetch_alerts()
                 dets.extend(classify_alerts(alerts))
             except Exception as e:  # noqa: BLE001
                 errors.append(f"alerts: {e}")

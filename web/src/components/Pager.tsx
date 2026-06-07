@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import clsx from "clsx";
 import { Tile, StatusLED, type LEDColor } from "./hud";
+import { apiGet } from "../lib/api";
 
 // --------------------------------------------------------------------------- //
 // Pager — the live activity / loot feed. Polls `GET /api/ops/events` and
@@ -24,17 +25,6 @@ type EventsResponse = {
   events: PagerEvent[];
   count: number;
 };
-
-const auth = "Basic " + btoa("warlock:warlock");
-
-async function api<T = any>(path: string, init?: RequestInit): Promise<T> {
-  const r = await fetch(path, {
-    ...init,
-    headers: { "Content-Type": "application/json", Authorization: auth, ...(init?.headers || {}) },
-  });
-  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
-  return r.json();
-}
 
 // Severity → phosphor LED colour. Unknown severities fall back to violet so a
 // new/odd severity still renders an icon instead of breaking the row.
@@ -97,7 +87,7 @@ export function Pager({
   const refresh = useCallback(async () => {
     try {
       const q = `/api/ops/events?limit=${limit}&audit=${audit ? 1 : 0}`;
-      const r = await api<EventsResponse>(q);
+      const r = await apiGet<EventsResponse>(q);
       setEvents(r.events || []);
       setErr(null);
       seen.current = true;

@@ -123,7 +123,7 @@ def _install_fake_spawn(monkeypatch, output: bytes, rc: int = 0, err: bytes = b"
     deterministic on a dev box that may not have nmap/nikto/lynis installed."""
     import warlock.modules.server_audit as sa
 
-    async def fake_spawn(argv):
+    async def fake_spawn(argv, env=None):
         return FakeProc(output, rc, err)
 
     monkeypatch.setattr(sa, "_spawn", fake_spawn)
@@ -262,13 +262,19 @@ def test_ssh_argv_key_uses_batchmode():
     assert "AUDIT-SSH-BEGIN" in argv[-1]  # read-only audit script is the final arg
 
 
-def test_ssh_argv_password_uses_sshpass(monkeypatch):
+def test_ssh_argv_password_uses_sshpass_env_not_argv(monkeypatch):
+    """Password auth uses ``sshpass -e`` — the secret is fed via the SSHPASS env
+    var at spawn time and must NEVER appear in argv (and so never in /proc nor in
+    the stored audit command)."""
     import warlock.modules.server_audit as sa
 
     monkeypatch.setattr(sa, "SSHPASS", "/usr/bin/sshpass")
     argv = sa._ssh_argv(host="h", user="u", password="s3cret")
     assert argv[0].endswith("sshpass")
-    assert argv[argv.index("-p") + 1] == "s3cret"
+    assert argv[1] == "-e"                    # sshpass reads the password from $SSHPASS
+    assert "s3cret" not in argv              # the secret is nowhere in the argv
+    # The only "-p" present is ssh's PORT flag (value 22), never a password flag.
+    assert argv[argv.index("-p") + 1] == "22"
     assert "PubkeyAuthentication=no" in argv
 
 
@@ -465,6 +471,49 @@ def test_lifecycle_ssh_connect_failure(monkeypatch):
     assert "refused" in (job.error or "")
 
 
+def test_ssh_password_never_in_audit_or_argv(monkeypatch):
+    """sshpass -e regression: a password-auth ssh-config job must keep the secret
+    OUT of the stored audit command, the sha256 input, the job argv, and to_dict;
+    it lives only in the (non-serialised) job.env SSHPASS var."""
+    from warlock.db import session_scope
+    from warlock.models import AuditEntry
+    from warlock.modules import server_audit as sa
+
+    secret = "sup3r-s3cret-pw"
+    _engage(ip_ranges=[SCOPE_CIDR])
+    monkeypatch.setattr(sa, "SSHPASS", "/usr/bin/sshpass")
+    _install_fake_spawn(monkeypatch, SSH_AUDIT_OUT.encode(), rc=0)
+
+    async def scenario():
+        q = sa.AuditQueue()
+        job = await q.submit(
+            audit_type="ssh-config", target=IN_SCOPE_IP, user="root", password=secret
+        )
+        await job.task
+        return job
+
+    job = asyncio.run(scenario())
+
+    # The password is fed via the env var only.
+    assert job.env is not None and job.env.get("SSHPASS") == secret
+    # ...and is nowhere in the argv or the serialised job.
+    assert secret not in " ".join(job.argv)
+    assert "-e" in job.argv  # sshpass -e (env-fed), not -p <password>
+    assert secret not in str(job.to_dict())
+    assert "env" not in job.to_dict()  # env is never serialised
+
+    # The durable audit row (command + sha256 input) is free of the password.
+    with session_scope() as s:
+        rows = (
+            s.query(AuditEntry)
+            .filter(AuditEntry.kind == "job.submit", AuditEntry.target == IN_SCOPE_IP)
+            .all()
+        )
+        assert rows, "expected a job.submit audit row for the accepted ssh-config run"
+        for row in rows:
+            assert secret not in (row.command or "")
+
+
 # --------------------------------------------------------------------------- #
 # LOCAL lynis — UNGATED (works with engagement OFF) but STILL audited
 # --------------------------------------------------------------------------- #
@@ -529,7 +578,7 @@ def test_cancel_running_job(monkeypatch):
         q = sa.AuditQueue()
         started = asyncio.Event()
 
-        async def slow_spawn(argv):
+        async def slow_spawn(argv, env=None):
             started.set()
             return _NeverProc()
 

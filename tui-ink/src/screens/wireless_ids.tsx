@@ -7,7 +7,7 @@
 //   GET /api/wireless_ids/status     → running, iface, kismet_reachable, uptime_s, allowlist
 //   GET /api/wireless_ids/detections → count, counts{rogue_ap,evil_twin,deauth_flood}, detections[]
 
-import { Box, Text } from "ink";
+import { Box, Text, useStdout } from "ink";
 import { BigValue } from "../components/BigValue.js";
 import { ModuleHeader } from "../components/ModuleHeader.js";
 import { StatusLED } from "../components/StatusLED.js";
@@ -90,6 +90,8 @@ function fmtUptime(s: number | null): string {
 
 export function Screen() {
   const api = useApi();
+  const { stdout } = useStdout();
+  const detW = Math.min((stdout?.columns ?? 120) - 2, TILE_W * 4);
 
   const { data: status, error: statusErr } = usePoll<WirelessIdsStatus>(
     () => api.get<WirelessIdsStatus>("/api/wireless_ids/status"),
@@ -176,62 +178,70 @@ export function Screen() {
       </Box>
 
       {/* ── Detection feed ───────────────────────────────────────────────── */}
-      <Tile
-        title="DETECTIONS"
-        led={
-          detections.some((d) => d.severity === "high")
-            ? "pink"
-            : detections.length
-            ? "amber"
-            : "mint"
-        }
-        width={TILE_W * 4}
-      >
-        {det?.errors && det.errors.length > 0 ? (
-          <Text color={COLORS.amber}>kismet REST: {det.errors.join("; ")}</Text>
-        ) : null}
+      {(() => {
+        const DET_CAP = 11;
+        const visible = detections.slice(0, DET_CAP);
+        const more = detections.length > DET_CAP ? detections.length - DET_CAP : 0;
+        return (
+          <Tile
+            title={`DETECTIONS (${detections.length})`}
+            led={
+              detections.some((d) => d.severity === "high")
+                ? "pink"
+                : detections.length
+                ? "amber"
+                : "mint"
+            }
+            width={detW}
+          >
+            {det?.errors && det.errors.length > 0 ? (
+              <Text color={COLORS.amber}>kismet REST: {det.errors.join("; ")}</Text>
+            ) : null}
 
-        {detections.length === 0 ? (
-          <Text color={TEXT.dim}>
-            {running
-              ? "monitoring active — set an SSID allowlist to flag rogues"
-              : "no detections — start monitoring and set an SSID allowlist"}
-          </Text>
-        ) : (
-          <Box flexDirection="column">
-            {/* Column headers */}
-            <Box>
+            {detections.length === 0 ? (
               <Text color={TEXT.dim}>
-                {"SEV   TYPE          BSSID              SSID              CH    Detail"}
+                {running
+                  ? "monitoring active — set an SSID allowlist to flag rogues"
+                  : "no detections — start monitoring and set an SSID allowlist"}
               </Text>
-            </Box>
+            ) : (
+              <Box flexDirection="column">
+                {/* Column headers */}
+                <Box>
+                  <Text color={TEXT.dim}>
+                    {"SEV   TYPE          BSSID              SSID              CH    Detail"}
+                  </Text>
+                </Box>
 
-            {detections.slice(0, 11).map((d, i) => (
-              <Box key={`${d.type}-${d.bssid}-${i}`}>
-                <StatusLED color={sevLed(d.severity)} />
-                <Text color={COLORS[sevLed(d.severity)]}>
-                  {` ${d.severity.slice(0, 4).toUpperCase().padEnd(5)}`}
-                </Text>
-                <Text color={COLORS.violet}>
-                  {`${TYPE_LABEL[d.type]}`.padEnd(14)}
-                </Text>
-                <Text color={TEXT.body}>
-                  {`${d.bssid || "—"}`.padEnd(19)}
-                </Text>
-                <Text color={TEXT.body}>
-                  {`${d.ssid || "—"}`.slice(0, 17).padEnd(18)}
-                </Text>
-                <Text color={TEXT.dim}>
-                  {`${d.channel ?? "?"}`.padEnd(6)}
-                </Text>
-                <Text color={TEXT.dim} wrap="truncate-end">
-                  {d.detail}
-                </Text>
+                {visible.map((d, i) => (
+                  <Box key={`${d.type}-${d.bssid}-${i}`}>
+                    <StatusLED color={sevLed(d.severity)} />
+                    <Text color={COLORS[sevLed(d.severity)]}>
+                      {` ${d.severity.slice(0, 4).toUpperCase().padEnd(5)}`}
+                    </Text>
+                    <Text color={COLORS.violet}>
+                      {`${TYPE_LABEL[d.type]}`.padEnd(14)}
+                    </Text>
+                    <Text color={TEXT.body}>
+                      {`${d.bssid || "—"}`.padEnd(19)}
+                    </Text>
+                    <Text color={TEXT.body}>
+                      {`${d.ssid || "—"}`.slice(0, 17).padEnd(18)}
+                    </Text>
+                    <Text color={TEXT.dim}>
+                      {`${d.channel ?? "?"}`.padEnd(6)}
+                    </Text>
+                    <Text color={TEXT.dim} wrap="truncate-end">
+                      {d.detail}
+                    </Text>
+                  </Box>
+                ))}
+                {more > 0 ? <Text color={TEXT.dim}>  +{more} more detections</Text> : null}
               </Box>
-            ))}
-          </Box>
-        )}
-      </Tile>
+            )}
+          </Tile>
+        );
+      })()}
     </Box>
   );
 }

@@ -4,8 +4,8 @@
 // Keys: 1/2 switch view, j/k move cursor, d set-default, m mute, t test (sinks),
 //       +/- adjust volume ±10%. Actions POST immediately and trigger a refetch.
 
-import { Box, Text, useInput } from "ink";
-import { useState } from "react";
+import { Box, Text, useInput, useStdout } from "ink";
+import { useRef, useState } from "react";
 import { ModuleHeader } from "../components/ModuleHeader.js";
 import { StatusLED } from "../components/StatusLED.js";
 import { Tile } from "../components/Tile.js";
@@ -27,6 +27,12 @@ type AudioDevices = {
   sources: AudioDevice[];
 };
 
+function useLive<T>(v: T) {
+  const r = useRef(v);
+  r.current = v;
+  return r;
+}
+
 function volLed(dev: AudioDevice): LEDColor {
   if (dev.muted) return "dim";
   if (dev.volume > 1.0) return "pink";
@@ -36,6 +42,8 @@ function volLed(dev: AudioDevice): LEDColor {
 
 export function Screen() {
   const api = useApi();
+  const { stdout } = useStdout();
+  const tileW = Math.min((stdout?.columns ?? 120) - 2, 116);
   const [view, setView] = useState<"sinks" | "sources">("sinks");
   const [cursor, setCursor] = useState(0);
   const [tick, setTick] = useState(0);
@@ -50,8 +58,15 @@ export function Screen() {
   const devices: AudioDevice[] = data ? (view === "sinks" ? data.sinks : data.sources) : [];
   const sel: AudioDevice | null = devices[cursor] ?? null;
 
+  // Live refs — prevent stale closure in useInput
+  const devicesRef = useLive(devices);
+  const selRef = useLive(sel);
+  const viewRef = useLive(view);
+
   useInput((input, key) => {
-    const listLen = devices.length;
+    const listLen = devicesRef.current.length;
+    const curSel = selRef.current;
+    const curView = viewRef.current;
 
     if (key.upArrow || input === "k") {
       setCursor(c => Math.max(0, c - 1));
@@ -64,33 +79,33 @@ export function Screen() {
     if (input === "1") { setView("sinks"); setCursor(0); setMsg(null); return; }
     if (input === "2") { setView("sources"); setCursor(0); setMsg(null); return; }
 
-    if (!sel) return;
+    if (!curSel) return;
 
     if (input === "d") {
       void api
-        .post("/api/audio/default", { id: sel.id })
-        .then(() => { setTick(t => t + 1); setMsg(`Default → ${sel.name}`); })
+        .post("/api/audio/default", { id: curSel.id })
+        .then(() => { setTick(t => t + 1); setMsg(`Default → ${curSel.name}`); })
         .catch((e: unknown) => setMsg(`ERR: ${e instanceof Error ? e.message : String(e)}`));
     } else if (input === "m") {
       void api
-        .post("/api/audio/mute", { id: sel.id, muted: !sel.muted })
-        .then(() => { setTick(t => t + 1); setMsg(sel.muted ? "Unmuted" : "Muted"); })
+        .post("/api/audio/mute", { id: curSel.id, muted: !curSel.muted })
+        .then(() => { setTick(t => t + 1); setMsg(curSel.muted ? "Unmuted" : "Muted"); })
         .catch((e: unknown) => setMsg(`ERR: ${e instanceof Error ? e.message : String(e)}`));
-    } else if (input === "t" && view === "sinks") {
+    } else if (input === "t" && curView === "sinks") {
       void api
-        .post("/api/audio/test", { id: sel.id })
-        .then(() => setMsg(`Test tone → ${sel.name}`))
+        .post("/api/audio/test", { id: curSel.id })
+        .then(() => setMsg(`Test tone → ${curSel.name}`))
         .catch((e: unknown) => setMsg(`ERR: ${e instanceof Error ? e.message : String(e)}`));
     } else if (input === "+") {
-      const vol = Math.round(Math.min(1.5, sel.volume + 0.1) * 10) / 10;
+      const vol = Math.round(Math.min(1.5, curSel.volume + 0.1) * 10) / 10;
       void api
-        .post("/api/audio/volume", { id: sel.id, volume: vol })
+        .post("/api/audio/volume", { id: curSel.id, volume: vol })
         .then(() => setTick(t => t + 1))
         .catch((e: unknown) => setMsg(`ERR: ${e instanceof Error ? e.message : String(e)}`));
     } else if (input === "-") {
-      const vol = Math.round(Math.max(0, sel.volume - 0.1) * 10) / 10;
+      const vol = Math.round(Math.max(0, curSel.volume - 0.1) * 10) / 10;
       void api
-        .post("/api/audio/volume", { id: sel.id, volume: vol })
+        .post("/api/audio/volume", { id: curSel.id, volume: vol })
         .then(() => setTick(t => t + 1))
         .catch((e: unknown) => setMsg(`ERR: ${e instanceof Error ? e.message : String(e)}`));
     }
@@ -142,7 +157,7 @@ export function Screen() {
       <Tile
         title={view === "sinks" ? "OUTPUT SINKS" : "INPUT SOURCES"}
         led={data ? (devices.length > 0 ? "mint" : "amber") : "dim"}
-        width={116}
+        width={tileW}
       >
         {!data ? (
           <Text color={TEXT.dim}>acquiring devices…</Text>
