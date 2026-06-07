@@ -22,6 +22,29 @@ A2 (hardware: TDR/PoE/RF-spectrum + optional USB-GbE 2nd port) = BOM + SW-hooks 
   full floor-plan image calibration / Ekahau-grade interpolation (later); needs a portable walk —
   verify on the deck by walking it around a space.
 
+### Field-technician utility suite *(added 2026-06-07 — "Swiss Army knife with teeth")*
+The deck is field utility gear first, security tool second. These slot beside `netdiag`:
+
+- **A7 — Packet capture & expert analysis ("the shark").** `tshark`/`tcpdump` capture on any iface,
+  BPF filters, ring-buffer for long runs, Wireshark-compatible `.pcap` export; expert info
+  (retransmits / resets / dup-ACKs / zero-windows), top talkers, protocol hierarchy, conversation
+  stats. (Needs `tshark`.) Gate beyond own-network capture.
+- **A8 — VoIP troubleshooting.** RTP stream quality — **jitter, loss, out-of-order, MOS / R-factor**
+  (E-model) + codec; SIP call-flow; **DSCP/QoS marking verification (EF 46 end-to-end)**; synthetic
+  RTP / SIP-OPTIONS probe to a PBX. (Builds on A7's capture.)
+- **A9 — Service & WAN health.** DHCP test + **rogue-DHCP detection**; DNS health (latency / multi-
+  resolver / DNSSEC); **NTP offset** (deck GPS = reference clock); captive-portal + WAN reachability;
+  mDNS/SSDP/IGMP discovery. (nmap scripts + nping + dig + chrony.)
+- **A10 — Link integrity & error counters.** `ethtool -S` CRC/FCS/drop counters; **duplex-mismatch
+  detection** (late-collision/FCS signature); **link-flap monitor**. Cable TDR / PoE → A2 hardware.
+- **A11 — Field utility pack.** MAC **OUI vendor lookup** (offline db), subnet/CIDR calc, **Wake-on-
+  LAN**, **TLS/cert inspector** (expiry/chain/weak ciphers), internet speed test, and a
+  **"leave-it-running" continuous monitor** (link flaps / new hosts / latency drift + anomaly alerts,
+  extending net_recon baseline-diff).
+
+> Build sequencing TBD with the operator; A7 (capture) underpins A8 (VoIP). All blue-team/local by
+> default; capture/scan beyond the local segment stays engagement-gated.
+
 ---
 
 ## Track B — Control plane (AAR): identity → log → grants → ingest → producer *(NEXT)*
