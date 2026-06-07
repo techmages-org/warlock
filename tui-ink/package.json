@@ -5,7 +5,8 @@
   "type": "module",
   "description": "Warlock TUI — Ink (React-for-CLI) front end mirroring the web HUD, hitting the same FastAPI backend.",
   "bin": {
-    "warlock-tui": "dist/cli.js"
+    "warlock-tui": "dist/cli.js",
+    "warlock-chat": "dist/chat.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
