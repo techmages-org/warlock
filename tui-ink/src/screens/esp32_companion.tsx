@@ -3,7 +3,7 @@
 // shows the real "pending" status and the developer roadmap from the todo list.
 // No interactive actions are available until the Marauder serial bridge lands.
 
-import { Box, Text } from "ink";
+import { Box, Text, useStdout } from "ink";
 import { ModuleHeader } from "../components/ModuleHeader.js";
 import { Tile } from "../components/Tile.js";
 import { useApi } from "../context.js";
@@ -20,6 +20,8 @@ type Esp32Status = {
 
 export function Screen() {
   const api = useApi();
+  const { stdout } = useStdout();
+  const tileW = Math.min((stdout?.columns ?? 120) - 2, 116);
   const { data, error } = usePoll<Esp32Status>(
     () => api.get<Esp32Status>("/api/esp32_companion/status"),
     5000,
@@ -85,7 +87,7 @@ export function Screen() {
         </Tile>
       </Box>
 
-      <Tile title="SERIAL BRIDGE" led="dim" width={116}>
+      <Tile title="SERIAL BRIDGE" led="dim" width={tileW}>
         <Text color={TEXT.dim}>
           Marauder bridge not yet active · awaiting /dev/ttyUSB* or /dev/ttyACM* enumeration
         </Text>

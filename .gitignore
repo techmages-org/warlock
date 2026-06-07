@@ -41,3 +41,5 @@ secrets.yaml
 ops/
 HANDOFF.md
 ORCHESTRATION.md
+# TUI agent provider key (Z.AI / OpenAI-compatible) — operator-local, never push
+agent.env

@@ -119,6 +119,69 @@ describe("Ops / Engagements screen", () => {
     unmount();
   });
 
+  it("switches to HISTORY tab on key '3'", async () => {
+    const { lastFrame, stdin, unmount } = render(
+      <WarlockProvider value={mockContext(ENGAGED_STATUS)}>
+        <Screen />
+      </WarlockProvider>,
+    );
+    await vi.waitFor(() => expect(lastFrame()).toContain("ENGAGED"));
+    stdin.write("3"); // → HISTORY tab
+    await vi.waitFor(() => expect(lastFrame()).toContain("ENGAGEMENT HISTORY"));
+    const frame = lastFrame()!;
+    expect(frame).toContain("Red Team Audit Q2");
+    expect(frame).toContain("active");
+    unmount();
+  });
+
+  it("switches to AUDIT tab on key '4' and shows audit rows", async () => {
+    const { lastFrame, stdin, unmount } = render(
+      <WarlockProvider value={mockContext(ENGAGED_STATUS)}>
+        <Screen />
+      </WarlockProvider>,
+    );
+    await vi.waitFor(() => expect(lastFrame()).toContain("ENGAGED"));
+    stdin.write("4"); // → AUDIT tab
+    await vi.waitFor(() => expect(lastFrame()).toContain("AUDIT LOG"));
+    await vi.waitFor(() => expect(lastFrame()).toContain("airodump-ng wlan0mon"));
+    expect(lastFrame()).toContain("COMMAND");
+    unmount();
+  });
+
+  it("calls end-engagement API when 'e' is pressed while engaged", async () => {
+    const ctx = mockContext(ENGAGED_STATUS);
+    const { lastFrame, stdin, unmount } = render(
+      <WarlockProvider value={ctx}>
+        <Screen />
+      </WarlockProvider>,
+    );
+    await vi.waitFor(() => expect(lastFrame()).toContain("ENGAGED"));
+    stdin.write("e"); // end engagement
+    await vi.waitFor(() =>
+      (ctx.api.post as ReturnType<typeof vi.fn>).mock.calls.some(
+        (c: unknown[]) => String(c[0]).includes("/api/ops/engagements/end")
+      )
+    );
+    unmount();
+  });
+
+  it("calls killswitch API when 'k' is pressed", async () => {
+    const ctx = mockContext(SAFE_STATUS);
+    const { lastFrame, stdin, unmount } = render(
+      <WarlockProvider value={ctx}>
+        <Screen />
+      </WarlockProvider>,
+    );
+    await vi.waitFor(() => expect(lastFrame()).toContain("SAFE"));
+    stdin.write("k"); // killswitch
+    await vi.waitFor(() =>
+      (ctx.api.post as ReturnType<typeof vi.fn>).mock.calls.some(
+        (c: unknown[]) => String(c[0]).includes("/api/ops/killswitch")
+      )
+    );
+    unmount();
+  });
+
   it("shows LINK ERROR when the status endpoint fails", async () => {
     const api: ApiClient = {
       baseUrl: "http://test",

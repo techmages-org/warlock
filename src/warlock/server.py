@@ -1,9 +1,7 @@
 """FastAPI application — wires modules, event bus, static web build."""
 from __future__ import annotations
 
-import base64
 import logging
-import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -17,6 +15,7 @@ from warlock import __version__
 from warlock.api import engagements as engagements_api
 from warlock.api import health as health_api
 from warlock.api import ws as ws_api
+from warlock.auth import check_basic_auth
 from warlock.config import get_settings
 from warlock.db import init_db
 from warlock.registry import load_modules
@@ -35,47 +34,35 @@ def _check_auth(conn: HTTPConnection) -> None:
 
     Uses ``HTTPConnection`` (base of Request+WebSocket) so the dependency is
     safely attachable to routers that also contain WebSocket endpoints.
-    WebSocket scopes bypass Basic auth entirely — the WS endpoints are all
-    LAN-trusted for now (same as ``/ws``).
+    WebSocket scopes are authenticated per-socket inside ``api.ws`` (the same
+    Basic credential is validated on the upgrade handshake), so they bypass this
+    HTTP dependency. Credential checking is delegated to ``warlock.auth`` so the
+    HTTP and WS surfaces share one implementation.
     """
-    if not _settings.web_password:
-        return
     if conn.url.path in _UNAUTHED_PATHS or conn.url.path.startswith("/ws/"):
         return
     if conn.scope.get("type") == "websocket":
         return
-    auth_header = conn.headers.get("authorization", "")
-    if not auth_header.lower().startswith("basic "):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="auth required",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    try:
-        decoded = base64.b64decode(auth_header.split(" ", 1)[1]).decode(
-            "utf-8", errors="replace"
-        )
-        username, _, password = decoded.partition(":")
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"malformed basic header: {e}",
-            headers={"WWW-Authenticate": "Basic"},
-        ) from None
-    ok_user = secrets.compare_digest(username, _settings.web_username)
-    ok_pass = secrets.compare_digest(password, _settings.web_password)
-    if not (ok_user and ok_pass):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="bad credentials",
-            headers={"WWW-Authenticate": "Basic"},
-        )
+    if check_basic_auth(conn.headers.get("authorization")):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="auth required",
+        headers={"WWW-Authenticate": "Basic"},
+    )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
     log.info("warlock v%s starting on %s:%s", __version__, _settings.host, _settings.port)
+    if not _settings.web_password:
+        log.warning(
+            "WARLOCK_WEB_PASSWORD is empty — HTTP Basic auth is DISABLED; ALL /api and "
+            "/ws endpoints are OPEN on %s:%s. Set WARLOCK_WEB_PASSWORD to require auth.",
+            _settings.host,
+            _settings.port,
+        )
     # Dispatch module startup hooks if defined.
     for m in app.state.modules:
         if hasattr(m, "on_startup"):

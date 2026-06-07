@@ -4,7 +4,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,6 +16,16 @@ class Settings(BaseSettings):
     port: int = Field(default=7777, description="HTTP port")
     web_password: str = Field(default="warlock", description="Basic-auth password for /web + /api")
     web_username: str = Field(default="warlock", description="Basic-auth username")
+    # Opt-in HTTP Basic auth on the /ws handshake. DEFAULT OFF: the browser
+    # WebSocket API cannot send an Authorization header, so enforcing by default
+    # would 403 the web event bus (live engagement/alert updates) into a reconnect
+    # loop. The TUI client DOES send the header, so flip this ON (WARLOCK_WS_AUTH=1)
+    # once the web side has a header-free auth path (token/cookie). Env: WARLOCK_WS_AUTH.
+    web_ws_auth: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("WARLOCK_WS_AUTH", "web_ws_auth"),
+        description="Enforce Basic auth on the /ws handshake (opt-in; default OFF to avoid web regression)",
+    )
     mesh_host: str = Field(default="127.0.0.1")
     mesh_port: int = Field(default=4403)
     gpsd_host: str = Field(default="127.0.0.1")

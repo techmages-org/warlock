@@ -6,8 +6,8 @@
 // Keys: 1-4 switch tabs (disabled while in form), ↑↓ form field nav / list cursor,
 //       e end engagement, k killswitch. Esc exits the NEW form.
 
-import { Box, Text, useInput } from "ink";
-import { useState } from "react";
+import { Box, Text, useInput, useStdout } from "ink";
+import { useRef, useState } from "react";
 import TextInput from "ink-text-input";
 import { ModuleHeader } from "../components/ModuleHeader.js";
 import { StatusLED } from "../components/StatusLED.js";
@@ -81,6 +81,12 @@ type Tab = "active" | "new" | "history" | "audit";
 // catch client-side for a clean inline error.
 const TARGETS_DENYLIST = new Set(["ssid", "bssid", "ip/cidr", "cidr"]);
 
+function useLive<T>(v: T) {
+  const r = useRef(v);
+  r.current = v;
+  return r;
+}
+
 /** Returns true when `raw` is blank or consists entirely of placeholder tokens. */
 export function isBlockedTargets(raw: string): boolean {
   const tokens = raw.split(",").map(s => s.trim()).filter(Boolean);
@@ -91,6 +97,8 @@ export function isBlockedTargets(raw: string): boolean {
 
 export function Screen() {
   const api = useApi();
+  const { stdout } = useStdout();
+  const tileW = Math.min((stdout?.columns ?? 120) - 2, 116);
 
   // Tab + list cursor (shared, resets on tab switch)
   const [tab, setTab] = useState<Tab>("active");
@@ -131,6 +139,13 @@ export function Screen() {
   const audits = auditList?.audit ?? [];
   const inForm = tab === "new";
 
+  // Live refs — prevent stale closure in useInput
+  const tabRef = useLive(tab);
+  const inFormRef = useLive(inForm);
+  const opsStatusRef = useLive(opsStatus);
+  const engagementsRef = useLive(engagements);
+  const auditsRef = useLive(audits);
+
   // Form submit handler
   const handleSubmit = () => {
     if (!formName.trim() || !formAuth.trim()) {
@@ -166,8 +181,11 @@ export function Screen() {
   };
 
   useInput((input, key) => {
+    const curTab = tabRef.current;
+    const curInForm = inFormRef.current;
+
     // Tab switching — disabled while typing in form
-    if (!inForm) {
+    if (!curInForm) {
       if (input === "1") { setTab("active"); setCursor(0); setActionMsg(null); return; }
       if (input === "2") { setTab("new"); setFormField(0); setActionMsg(null); return; }
       if (input === "3") { setTab("history"); setCursor(0); setActionMsg(null); return; }
@@ -175,7 +193,7 @@ export function Screen() {
     }
 
     // Form navigation
-    if (inForm) {
+    if (curInForm) {
       if (key.escape) { setTab("active"); setFormField(0); setActionMsg(null); return; }
       if (key.downArrow) { setFormField(f => Math.min(3, f + 1)); return; }
       if (key.upArrow) { setFormField(f => Math.max(0, f - 1)); return; }
@@ -183,8 +201,8 @@ export function Screen() {
     }
 
     // Active tab actions
-    if (tab === "active") {
-      if (input === "e" && opsStatus?.mode === "on") {
+    if (curTab === "active") {
+      if (input === "e" && opsStatusRef.current?.mode === "on") {
         void api
           .post("/api/ops/engagements/end")
           .then(() => { setTick(t => t + 1); setActionMsg("Engagement ended"); })
@@ -199,7 +217,7 @@ export function Screen() {
     }
 
     // List cursor (history / audit)
-    const listLen = tab === "history" ? engagements.length : tab === "audit" ? audits.length : 0;
+    const listLen = curTab === "history" ? engagementsRef.current.length : curTab === "audit" ? auditsRef.current.length : 0;
     if (key.downArrow || input === "j") { setCursor(c => Math.min(Math.max(0, listLen - 1), c + 1)); }
     if (key.upArrow || input === "k") { setCursor(c => Math.max(0, c - 1)); }
   });
@@ -235,7 +253,7 @@ export function Screen() {
       />
 
       {/* Engagement status banner */}
-      <Tile title="ENGAGEMENT STATUS" led={modeLed} width={116}>
+      <Tile title="ENGAGEMENT STATUS" led={modeLed} width={tileW}>
         {!opsStatus ? (
           <Text color={TEXT.dim}>acquiring status…</Text>
         ) : opsStatus.mode === "on" ? (
@@ -270,7 +288,7 @@ export function Screen() {
 
       {/* ── ACTIVE TAB ────────────────────────────────────────────────────────── */}
       {tab === "active" && (
-        <Tile title="ACTIVE ENGAGEMENT" led={modeLed} width={116}>
+        <Tile title="ACTIVE ENGAGEMENT" led={modeLed} width={tileW}>
           {!opsStatus || opsStatus.mode === "off" ? (
             <Box flexDirection="column">
               <Text color={TEXT.dim}>No active engagement.</Text>
@@ -313,7 +331,7 @@ export function Screen() {
 
       {/* ── NEW ENGAGEMENT FORM ───────────────────────────────────────────────── */}
       {tab === "new" && (
-        <Tile title="NEW ENGAGEMENT" led="violet" width={116}>
+        <Tile title="NEW ENGAGEMENT" led="violet" width={tileW}>
           {submitting ? (
             <Text color={COLORS.amber}>Creating engagement…</Text>
           ) : (
@@ -382,7 +400,7 @@ export function Screen() {
 
       {/* ── HISTORY TAB ──────────────────────────────────────────────────────── */}
       {tab === "history" && (
-        <Tile title="ENGAGEMENT HISTORY" led="dim" width={116}>
+        <Tile title="ENGAGEMENT HISTORY" led="dim" width={tileW}>
           {!engList ? (
             <Text color={TEXT.dim}>loading…</Text>
           ) : engagements.length === 0 ? (
@@ -410,7 +428,7 @@ export function Screen() {
 
       {/* ── AUDIT TAB ────────────────────────────────────────────────────────── */}
       {tab === "audit" && (
-        <Tile title="AUDIT LOG" led="dim" width={116}>
+        <Tile title="AUDIT LOG" led="dim" width={tileW}>
           {!auditList ? (
             <Text color={TEXT.dim}>loading…</Text>
           ) : audits.length === 0 ? (

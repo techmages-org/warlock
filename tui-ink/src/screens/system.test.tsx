@@ -100,6 +100,54 @@ describe("System screen", () => {
     unmount();
   });
 
+  it("switches to SERVICES tab on key '2' and shows service list", async () => {
+    const { lastFrame, stdin, unmount } = render(
+      <WarlockProvider value={mockContext()}>
+        <Screen />
+      </WarlockProvider>,
+    );
+    await vi.waitFor(() => expect(lastFrame()).toContain("gps"));
+    stdin.write("2"); // → SVC tab
+    await vi.waitFor(() => expect(lastFrame()).toContain("SYSTEMD SERVICES"));
+    await vi.waitFor(() => expect(lastFrame()).toContain("warlock.service"));
+    const frame = lastFrame()!;
+    expect(frame).toContain("meshtasticd.service");
+    expect(frame).toContain("active");
+    unmount();
+  });
+
+  it("switches to NETWORK tab on key '3'", async () => {
+    const { lastFrame, stdin, unmount } = render(
+      <WarlockProvider value={mockContext()}>
+        <Screen />
+      </WarlockProvider>,
+    );
+    await vi.waitFor(() => expect(lastFrame()).toContain("gps"));
+    stdin.write("3"); // → NET tab
+    await vi.waitFor(() => expect(lastFrame()).toContain("NETWORK INTERFACES"));
+    await vi.waitFor(() => expect(lastFrame()).toContain("eth0"));
+    expect(lastFrame()).toContain("192.168.1.50");
+    unmount();
+  });
+
+  it("toggles an AIO rail on 'o' and calls the rail API", async () => {
+    const ctx = mockContext();
+    const { lastFrame, stdin, unmount } = render(
+      <WarlockProvider value={ctx}>
+        <Screen />
+      </WarlockProvider>,
+    );
+    await vi.waitFor(() => expect(lastFrame()).toContain("gps"));
+    // gps is the first rail (level=1, ON) — 'o' should turn it OFF
+    stdin.write("o");
+    await vi.waitFor(() =>
+      (ctx.api.post as ReturnType<typeof vi.fn>).mock.calls.some(
+        (c: unknown[]) => String(c[0]).includes("/api/system/aio/gps/off")
+      )
+    );
+    unmount();
+  });
+
   it("shows LINK ERROR when the status endpoint fails", async () => {
     const api: ApiClient = {
       baseUrl: "http://test",

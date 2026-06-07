@@ -24,9 +24,11 @@ operator data root (``~/warlock/``) so no new DB model is required.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import ipaddress
 import json
 import logging
+import shlex
 import shutil
 import subprocess
 import xml.etree.ElementTree as ET
@@ -42,7 +44,7 @@ from warlock import events
 from warlock.config import get_settings
 from warlock.db import session_scope
 from warlock.engagement import engagement
-from warlock.models import Host, Scan
+from warlock.models import AuditEntry, Host, Scan
 from warlock.modules._base import ModuleBase
 
 log = logging.getLogger("warlock.net_recon")
@@ -55,6 +57,13 @@ PROFILES: dict[str, list[str]] = {
     "service": ["-T4", "-sV", "-sC", "--top-ports", "1000"],
     "vuln":    ["-T4", "--script", "vuln", "--top-ports", "1000"],
 }
+
+# Active/intrusive profiles that ALWAYS require an engagement, even against an
+# RFC1918 /24 — ``vuln`` runs NSE ``--script vuln`` and ``service`` runs
+# ``-sV -sC`` (version probes + default scripts). These are active vulnerability
+# scanners, not benign discovery, so the RFC1918 carve-out (meant for blue-team
+# ARP/quick sweeps of your own LAN) must NOT exempt them.
+ALWAYS_GATED_PROFILES: frozenset[str] = frozenset({"vuln", "service"})
 
 
 def _primary_iface_subnet() -> tuple[str | None, str | None]:
@@ -91,6 +100,27 @@ def _primary_iface_subnet() -> tuple[str | None, str | None]:
         return None, gw
     except Exception:  # noqa: BLE001
         return None, None
+
+
+def _sha256(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+def _audit(kind: str, command: str, target: str, note: str, outcome: str) -> None:
+    """Write a durable AuditEntry row (chain-of-custody) — mirrors crack._audit /
+    server_audit._audit exactly so portscans share the same forensic trail."""
+    with session_scope() as s:
+        s.add(
+            AuditEntry(
+                engagement_id=engagement.engagement_id,
+                kind=kind,
+                command=command,
+                sha256=_sha256(command),
+                target=target,
+                note=note,
+                outcome=outcome,
+            )
+        )
 
 
 def _is_rfc1918(target: str) -> bool:
@@ -528,26 +558,56 @@ class Module(ModuleBase):
             if not targets:
                 raise HTTPException(400, "targets required")
 
-            # Engagement gate: required for any non-RFC1918 OR a CIDR with prefix < /24
-            need_gate = False
-            for t in targets:
-                if not _is_rfc1918(t):
-                    need_gate = True
-                    break
-                if "/" in t:
-                    try:
-                        net = ipaddress.ip_network(t, strict=False)
-                        if net.prefixlen < 24:
-                            need_gate = True
-                            break
-                    except ValueError:
-                        pass
+            # Representative command recorded in the audit trail (the executed
+            # argv is `sudo -n nmap -oX - <profile> <targets>`; we log the
+            # meaningful, sudo/-oX-free form so the row is human-readable).
+            audit_command = shlex.join(["nmap", *PROFILES[body.profile], *targets])
+            audit_target = ",".join(targets)
+            audit_note = f"portscan {body.profile}"
+
+            # Engagement gate. Required when EITHER:
+            #   * the profile is active/intrusive (vuln / service) — ALWAYS gated,
+            #     even for an RFC1918 /24 (no carve-out for vuln scanners), OR
+            #   * any target is non-RFC1918, OR
+            #   * any target is a CIDR wider than /24.
+            need_gate = body.profile in ALWAYS_GATED_PROFILES
+            if not need_gate:
+                for t in targets:
+                    if not _is_rfc1918(t):
+                        need_gate = True
+                        break
+                    if "/" in t:
+                        try:
+                            net = ipaddress.ip_network(t, strict=False)
+                            if net.prefixlen < 24:
+                                need_gate = True
+                                break
+                        except ValueError:
+                            pass
             if need_gate:
                 if not engagement.is_on():
-                    raise HTTPException(403, "engagement OFF — non-RFC1918 or wide CIDR scans require an active engagement")
+                    _audit("scope.violation", audit_command, audit_target,
+                           f"engagement-off: {audit_note}", "refused")
+                    await events.bus.publish(
+                        events.ALERT_FIRED,
+                        {"severity": "warning", "source": "engagement",
+                         "message": "scope violation: engagement-off"},
+                    )
+                    raise HTTPException(403, "engagement OFF — this scan requires an active engagement")
                 for t in targets:
                     if not engagement.check_target(t):
+                        _audit("scope.violation", audit_command, t,
+                               f"out-of-scope: {audit_note}", "refused")
+                        await events.bus.publish(
+                            events.ALERT_FIRED,
+                            {"severity": "warning", "source": "engagement",
+                             "message": "scope violation: out-of-scope"},
+                        )
                         raise HTTPException(403, f"target {t!r} not in engagement scope")
+
+            # Accepted — every port scan (gated or ungated RFC1918 sweep) writes a
+            # job.submit audit row, matching crack / server_audit.
+            _audit("job.submit", audit_command, audit_target, audit_note, "submitted")
 
             argv = PROFILES[body.profile] + targets
             scan_id: str | None = None

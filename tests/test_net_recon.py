@@ -276,3 +276,119 @@ def test_existing_alerts_empty_by_default(client, tmp_path, monkeypatch):
     r = client.get("/api/net_recon/alerts")
     assert r.status_code == 200
     assert r.json()["alerts"] == []
+
+
+# --------------------------------------------------------------------------- #
+# Portscan engagement GATE + audit trail
+#
+#   * accepted scan (gated or ungated RFC1918 sweep) -> job.submit audit row
+#   * refused scan (engagement off / out of scope)   -> scope.violation row + 403
+#   * vuln / service profiles ALWAYS gated, even against an RFC1918 /24
+# --------------------------------------------------------------------------- #
+PSCAN_SCOPE = "192.168.50.0/24"
+
+
+@pytest.fixture(autouse=True)
+def _engagement_off():
+    from warlock.engagement import ScopeAllowlist, engagement
+
+    def _off() -> None:
+        engagement._mode = "off"
+        engagement.engagement_id = None
+        engagement.name = ""
+        engagement.scope = ScopeAllowlist()
+        engagement.started_at = None
+        engagement.audit_log_path = None
+
+    _off()
+    yield
+    _off()
+
+
+def _engage(ip_ranges=None) -> None:
+    from datetime import datetime
+
+    from warlock.engagement import ScopeAllowlist, engagement
+
+    engagement._mode = "on"
+    engagement.engagement_id = "test-eng-netrecon"
+    engagement.name = "test"
+    engagement.scope = ScopeAllowlist(ip_ranges=ip_ranges or [PSCAN_SCOPE])
+    engagement.started_at = datetime.utcnow()
+    engagement.audit_log_path = None  # DB AuditEntry only; no yaml file in tests
+
+
+def _count(kind: str, target: str) -> int:
+    from warlock.db import session_scope
+    from warlock.models import AuditEntry
+
+    with session_scope() as s:
+        return (
+            s.query(AuditEntry)
+            .filter(AuditEntry.kind == kind, AuditEntry.target == target)
+            .count()
+        )
+
+
+def test_portscan_rfc1918_quick_ungated_writes_job_submit(client, monkeypatch):
+    # An RFC1918 single-IP quick scan needs no engagement, but EVERY accepted scan
+    # is still audited with a job.submit row (chain-of-custody).
+    target = "192.168.50.10"
+    monkeypatch.setattr(nr, "_run_nmap", AsyncMock(return_value=_nmap_xml(
+        [{"ip": target, "ports": [(22, "ssh")]}]
+    )))
+    before = _count("job.submit", target)
+    r = client.post("/api/net_recon/portscan", json={"targets": [target], "profile": "quick"})
+    assert r.status_code == 200, r.text
+    assert _count("job.submit", target) == before + 1
+
+
+def test_portscan_non_rfc1918_refused_when_engagement_off(client, monkeypatch):
+    target = "8.8.8.8"
+    monkeypatch.setattr(nr, "_run_nmap", AsyncMock(return_value=_nmap_xml([])))
+    before = _count("scope.violation", target)
+    r = client.post("/api/net_recon/portscan", json={"targets": [target], "profile": "quick"})
+    assert r.status_code == 403
+    assert _count("scope.violation", target) == before + 1
+
+
+def test_portscan_vuln_profile_rfc1918_is_always_gated(client, monkeypatch):
+    # The headline security fix: an NSE vuln scan against an internal /24 host must
+    # NOT slip through the RFC1918 carve-out — it requires an engagement.
+    target = "192.168.50.10"
+    monkeypatch.setattr(nr, "_run_nmap", AsyncMock(return_value=_nmap_xml([])))
+    before = _count("scope.violation", target)
+    r = client.post("/api/net_recon/portscan", json={"targets": [target], "profile": "vuln"})
+    assert r.status_code == 403, r.text
+    assert _count("scope.violation", target) == before + 1
+
+
+def test_portscan_service_profile_rfc1918_is_always_gated(client, monkeypatch):
+    target = "192.168.50.20"
+    monkeypatch.setattr(nr, "_run_nmap", AsyncMock(return_value=_nmap_xml([])))
+    before = _count("scope.violation", target)
+    r = client.post("/api/net_recon/portscan", json={"targets": [target], "profile": "service"})
+    assert r.status_code == 403
+    assert _count("scope.violation", target) == before + 1
+
+
+def test_portscan_vuln_rfc1918_accepted_when_engaged_in_scope(client, monkeypatch):
+    target = "192.168.50.10"
+    _engage(ip_ranges=[PSCAN_SCOPE])
+    monkeypatch.setattr(nr, "_run_nmap", AsyncMock(return_value=_nmap_xml(
+        [{"ip": target, "ports": [(443, "https")]}]
+    )))
+    before = _count("job.submit", target)
+    r = client.post("/api/net_recon/portscan", json={"targets": [target], "profile": "vuln"})
+    assert r.status_code == 200, r.text
+    assert _count("job.submit", target) == before + 1
+
+
+def test_portscan_out_of_scope_refused_when_engaged(client, monkeypatch):
+    out_target = "8.8.8.8"
+    _engage(ip_ranges=[PSCAN_SCOPE])  # 8.8.8.8 not in 192.168.50.0/24
+    monkeypatch.setattr(nr, "_run_nmap", AsyncMock(return_value=_nmap_xml([])))
+    before = _count("scope.violation", out_target)
+    r = client.post("/api/net_recon/portscan", json={"targets": [out_target], "profile": "quick"})
+    assert r.status_code == 403
+    assert _count("scope.violation", out_target) == before + 1

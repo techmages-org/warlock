@@ -48,6 +48,7 @@ import asyncio
 import contextlib
 import hashlib
 import logging
+import os
 import re
 import shlex
 import shutil
@@ -232,9 +233,12 @@ def _ssh_argv(
     """Build the ``ssh`` invocation for a remote config audit.
 
     Key / agent auth uses ``BatchMode=yes`` (never blocks on a prompt). When an
-    operator supplies a *password* and ``sshpass`` is present we feed it instead
-    and force password auth. ``StrictHostKeyChecking=accept-new`` records new
-    host keys without an interactive prompt; ``ConnectTimeout`` bounds a dead host.
+    operator supplies a *password* and ``sshpass`` is present we use ``sshpass
+    -e`` and force password auth — the password is read from the ``SSHPASS``
+    environment variable at spawn time (see ``AuditQueue.submit``), so it appears
+    NEITHER in the process argv (``/proc/<pid>/cmdline``) NOR in the stored audit
+    ``command`` string. ``StrictHostKeyChecking=accept-new`` records new host keys
+    without an interactive prompt; ``ConnectTimeout`` bounds a dead host.
     """
     remote = script if script is not None else _ssh_remote_script()
     opts = ["-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=accept-new",
@@ -243,9 +247,9 @@ def _ssh_argv(
         opts += ["-i", key]
 
     if password and SSHPASS:
-        # sshpass feeds the password on stdin-less; disable pubkey to force it.
+        # sshpass -e: password comes from the SSHPASS env var, never argv.
         return [
-            SSHPASS, "-p", password, SSH,
+            SSHPASS, "-e", SSH,
             "-o", "BatchMode=no", "-o", "PubkeyAuthentication=no",
             "-o", "PreferredAuthentications=password,keyboard-interactive",
             *opts, f"{user}@{host}", remote,
@@ -513,6 +517,9 @@ class AuditJob:
     task: asyncio.Task | None = field(default=None, repr=False, compare=False)
     proc: Any = field(default=None, repr=False, compare=False)
     cancelled: bool = field(default=False, repr=False, compare=False)
+    # Subprocess environment overrides (e.g. SSHPASS for password auth). Held
+    # off the wire: never serialised by to_dict(), repr=False so it can't leak.
+    env: dict[str, str] | None = field(default=None, repr=False, compare=False)
 
     @property
     def terminal(self) -> bool:
@@ -585,12 +592,15 @@ async def _gate(*, remote: bool, command: str, target: str, scope_target: str, n
 # XML (ET.fromstring would choke). Every parser reads stdout only; ssh failure
 # detail is sourced from stderr. (Mirrors net_recon._run_nmap.)
 # --------------------------------------------------------------------------- #
-async def _spawn(argv: list[str]) -> asyncio.subprocess.Process:
+async def _spawn(
+    argv: list[str], env: dict[str, str] | None = None
+) -> asyncio.subprocess.Process:
     return await asyncio.create_subprocess_exec(
         *argv,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         stdin=asyncio.subprocess.DEVNULL,
+        env=env,
     )
 
 
@@ -643,6 +653,7 @@ class AuditQueue:
         remote = bool(spec["remote"])
         job_id = str(uuid4())
         report_file: str | None = None
+        ssh_env: dict[str, str] | None = None
         tgt = (target or "").strip()
 
         # Build argv + resolve the target label per type.
@@ -668,6 +679,11 @@ class AuditQueue:
                 raise HTTPException(400, "user is required for ssh-config")
             target_label = tgt
             argv = _ssh_argv(host=tgt, user=user, port=port, key=key, password=password)
+            if password and SSHPASS:
+                # Feed the password via the SSHPASS env var (sshpass -e). Inherit
+                # the rest of the environment (HOME/PATH/etc.) so ssh works, but
+                # keep the secret out of argv and therefore out of the audit row.
+                ssh_env = {**os.environ, "SSHPASS": password}
 
         command = shlex.join(argv)
         scope_target = _host_of(target_label) if remote else ""
@@ -677,7 +693,7 @@ class AuditQueue:
 
         job = AuditJob(
             id=job_id, audit_type=audit_type, target=target_label, note=note or spec["label"],
-            argv=argv, remote=remote, report_file=report_file,
+            argv=argv, remote=remote, report_file=report_file, env=ssh_env,
         )
         self._jobs[job_id] = job
         self._order.append(job_id)
@@ -715,7 +731,7 @@ class AuditQueue:
                     return
                 job.status = "running"
                 job.started_at = _now_iso()
-                proc = await _spawn(job.argv)
+                proc = await _spawn(job.argv, env=job.env)
                 job.proc = proc
                 timeout = TIMEOUTS.get(job.audit_type, 600.0)
                 try:

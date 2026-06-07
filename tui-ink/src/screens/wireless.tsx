@@ -14,7 +14,7 @@
 //   LOOT: ↑/↓ capture · Enter send-to-crack.
 // ============================================================================
 
-import { Box, Text, useInput, useStdin } from "ink";
+import { Box, Text, useInput, useStdin, useStdout } from "ink";
 import { useEffect, useRef, useState } from "react";
 import { BigValue } from "../components/BigValue.js";
 import { ModuleHeader } from "../components/ModuleHeader.js";
@@ -90,9 +90,17 @@ function useLive<T>(v: T) {
   return r;
 }
 
+function windowOf<T>(items: T[], sel: number, cap: number): { slice: T[]; start: number; more: number } {
+  if (cap <= 0 || items.length <= cap) return { slice: items, start: 0, more: 0 };
+  const start = Math.max(0, Math.min(sel - Math.floor(cap / 2), items.length - cap));
+  return { slice: items.slice(start, start + cap), start, more: items.length - cap };
+}
+
 export function Screen() {
   const api = useApi();
   const rawOk = !!useStdin().isRawModeSupported;
+  const { stdout } = useStdout();
+  const fullW = Math.min((stdout?.columns ?? 120) - 2, FULL_W);
   const { data: s, error } = usePoll<ReconStatus>(
     () => api.get<ReconStatus>("/api/wifi_recon/status"),
     2000,
@@ -364,7 +372,7 @@ export function Screen() {
     return (
       <Box flexDirection="column">
         <ModuleHeader code="11 WIRELESS" title="Wireless — Guided Flow" state="LINK ERROR" icon="⌖" />
-        <Tile title="ERROR" led="pink" width={TILE_W * 2}>
+        <Tile title="ERROR" led="pink" width={Math.min((stdout?.columns ?? 120) - 2, TILE_W * 2)}>
           <Text color={COLORS.pink}>wireless error: {error}</Text>
         </Tile>
       </Box>
@@ -436,11 +444,11 @@ export function Screen() {
         </Box>
       ) : null}
 
-      {step === "arm" && <ArmStep s={s} running={running} chanIdx={chanIdx} busy={busy} />}
-      {step === "recon" && <ReconStep running={running} aps={aps} clients={clients} sel={ti} />}
-      {step === "target" && <TargetStep target={target} clients={clients} />}
-      {step === "act" && <ActStep target={target} engaged={engaged} eng={eng} sel={oi} busy={busy} />}
-      {step === "loot" && <LootStep hands={hands} sel={hidx} busy={busy} />}
+      {step === "arm" && <ArmStep s={s} running={running} chanIdx={chanIdx} busy={busy} fullW={fullW} />}
+      {step === "recon" && <ReconStep running={running} aps={aps} clients={clients} sel={ti} fullW={fullW} />}
+      {step === "target" && <TargetStep target={target} clients={clients} fullW={fullW} />}
+      {step === "act" && <ActStep target={target} engaged={engaged} eng={eng} sel={oi} busy={busy} fullW={fullW} />}
+      {step === "loot" && <LootStep hands={hands} sel={hidx} busy={busy} fullW={fullW} />}
 
       <Box>
         <Text color={TEXT.dim}>{HINTS[step]}</Text>
@@ -458,7 +466,7 @@ const HINTS: Record<StepId, string> = {
 };
 
 // --------------------------------------------------------------------------- //
-function ArmStep({ s, running, chanIdx, busy }: { s: ReconStatus | null; running: boolean; chanIdx: number; busy: boolean }) {
+function ArmStep({ s, running, chanIdx, busy, fullW }: { s: ReconStatus | null; running: boolean; chanIdx: number; busy: boolean; fullW: number }) {
   return (
     <Box flexDirection="column">
       <Box>
@@ -480,7 +488,7 @@ function ArmStep({ s, running, chanIdx, busy }: { s: ReconStatus | null; running
           </Text>
         </Tile>
       </Box>
-      <Tile title="ARM THE RADIO" led={running ? "mint" : "violet"} width={FULL_W}>
+      <Tile title="ARM THE RADIO" led={running ? "mint" : "violet"} width={fullW}>
         <Box>
           <StatusLED color={running ? "mint" : "dim"} />
           <Text color={TEXT.body}>
@@ -507,7 +515,9 @@ function ArmStep({ s, running, chanIdx, busy }: { s: ReconStatus | null; running
   );
 }
 
-function ReconStep({ running, aps, clients, sel }: { running: boolean; aps: AP[]; clients: Client[]; sel: number }) {
+function ReconStep({ running, aps, clients, sel, fullW }: { running: boolean; aps: AP[]; clients: Client[]; sel: number; fullW: number }) {
+  const AP_CAP = 6;
+  const { slice: apSlice, start: apStart, more: apMore } = windowOf(aps, sel, AP_CAP);
   return (
     <Box flexDirection="column">
       {!running ? (
@@ -516,7 +526,7 @@ function ReconStep({ running, aps, clients, sel }: { running: boolean; aps: AP[]
           <Text color={COLORS.amber}> radio not armed — go to ① ARM to start the sweep (showing last results)</Text>
         </Box>
       ) : null}
-      <Tile title={`ACCESS POINTS — Enter to target (${aps.length})`} led={aps.length ? "mint" : "amber"} width={FULL_W}>
+      <Tile title={`ACCESS POINTS — Enter to target (${aps.length})`} led={aps.length ? "mint" : "amber"} width={fullW}>
         <Box>
           <Box width={3}><Text color={TEXT.dim}> </Text></Box>
           <Box width={20}><Text color={TEXT.dim}>BSSID</Text></Box>
@@ -529,8 +539,8 @@ function ReconStep({ running, aps, clients, sel }: { running: boolean; aps: AP[]
         {aps.length === 0 ? (
           <Text color={TEXT.dim}>no APs yet — arm the radio and wait for the sweep</Text>
         ) : (
-          aps.slice(0, 6).map((a, idx) => {
-            const on = idx === sel;
+          apSlice.map((a, i) => {
+            const on = (apStart + i) === sel;
             const nClients = clients.filter((c) => c.associated === a.bssid).length;
             return (
               <Box key={a.bssid}>
@@ -545,8 +555,9 @@ function ReconStep({ running, aps, clients, sel }: { running: boolean; aps: AP[]
             );
           })
         )}
+        {apMore > 0 ? <Text color={TEXT.dim}>  +{apMore} more — ↑/↓ to scroll</Text> : null}
       </Tile>
-      <Tile title={`STATIONS (${clients.length})`} led={clients.length ? "cyan" : "dim"} width={FULL_W}>
+      <Tile title={`STATIONS (${clients.length})`} led={clients.length ? "cyan" : "dim"} width={fullW}>
         {clients.length === 0 ? (
           <Text color={TEXT.dim}>no clients yet</Text>
         ) : (
@@ -564,10 +575,10 @@ function ReconStep({ running, aps, clients, sel }: { running: boolean; aps: AP[]
   );
 }
 
-function TargetStep({ target, clients }: { target: AP | null; clients: Client[] }) {
+function TargetStep({ target, clients, fullW }: { target: AP | null; clients: Client[]; fullW: number }) {
   if (!target) {
     return (
-      <Tile title="NO TARGET" led="amber" width={FULL_W}>
+      <Tile title="NO TARGET" led="amber" width={fullW}>
         <Text color={TEXT.body}>No access point selected yet.</Text>
         <Text color={TEXT.dim}>Go to ② RECON (press 2) and Enter on an AP row to lock it.</Text>
       </Tile>
@@ -591,7 +602,7 @@ function TargetStep({ target, clients }: { target: AP | null; clients: Client[] 
           {target.wps ? <Text color={COLORS.amber}>WPS enabled</Text> : null}
         </Tile>
       </Box>
-      <Tile title={`ASSOCIATED CLIENTS (${assoc.length})`} led={assoc.length ? "cyan" : "dim"} width={FULL_W}>
+      <Tile title={`ASSOCIATED CLIENTS (${assoc.length})`} led={assoc.length ? "cyan" : "dim"} width={fullW}>
         {assoc.length === 0 ? (
           <Text color={TEXT.dim}>no associated clients seen on this AP yet</Text>
         ) : (
@@ -611,10 +622,10 @@ function TargetStep({ target, clients }: { target: AP | null; clients: Client[] 
   );
 }
 
-function ActStep({ target, engaged, eng, sel, busy }: { target: AP | null; engaged: boolean; eng: EngagementStatus | null; sel: number; busy: boolean }) {
+function ActStep({ target, engaged, eng, sel, busy, fullW }: { target: AP | null; engaged: boolean; eng: EngagementStatus | null; sel: number; busy: boolean; fullW: number }) {
   if (!target) {
     return (
-      <Tile title="NO TARGET" led="amber" width={FULL_W}>
+      <Tile title="NO TARGET" led="amber" width={fullW}>
         <Text color={TEXT.body}>Select a target before launching an operation.</Text>
         <Text color={TEXT.dim}>Press 2 → RECON and Enter on an AP.</Text>
       </Tile>
@@ -633,7 +644,7 @@ function ActStep({ target, engaged, eng, sel, busy }: { target: AP | null; engag
           <Text color={TEXT.body}> — offensive ops are gated and refused (403) until an engagement is active. Ctrl+E → Operations.</Text>
         </Text>
       )}
-      <Tile title={`ACT — ${target.essid || target.bssid} (ch ${target.channel || "?"})`} led={engaged ? "pink" : "amber"} width={FULL_W}>
+      <Tile title={`ACT — ${target.essid || target.bssid} (ch ${target.channel || "?"})`} led={engaged ? "pink" : "amber"} width={fullW}>
         {ACT_OPS.map((op, idx) => {
           const on = idx === sel;
           const blocked = !engaged || (op.needsSsid && !target.essid);
@@ -654,10 +665,12 @@ function ActStep({ target, engaged, eng, sel, busy }: { target: AP | null; engag
   );
 }
 
-function LootStep({ hands, sel, busy }: { hands: Handshake[]; sel: number; busy: boolean }) {
+function LootStep({ hands, sel, busy, fullW }: { hands: Handshake[]; sel: number; busy: boolean; fullW: number }) {
+  const HAND_CAP = 6;
+  const { slice: handSlice, start: handStart, more: handMore } = windowOf(hands, sel, HAND_CAP);
   return (
     <Box flexDirection="column">
-      <Tile title={`CAPTURED HANDSHAKES — Enter to crack (${hands.length})`} led={hands.some((h) => h.eapol) ? "mint" : "amber"} width={FULL_W}>
+      <Tile title={`CAPTURED HANDSHAKES — Enter to crack (${hands.length})`} led={hands.some((h) => h.eapol) ? "mint" : "amber"} width={fullW}>
         <Box>
           <Box width={3}><Text color={TEXT.dim}> </Text></Box>
           <Box width={32}><Text color={TEXT.dim}>FILE</Text></Box>
@@ -668,8 +681,8 @@ function LootStep({ hands, sel, busy }: { hands: Handshake[]; sel: number; busy:
         {hands.length === 0 ? (
           <Text color={TEXT.dim}>no captures yet — run ④ Capture HS or PMKID against a target</Text>
         ) : (
-          hands.slice(0, 6).map((h, idx) => {
-            const on = idx === sel;
+          handSlice.map((h, i) => {
+            const on = (handStart + i) === sel;
             return (
               <Box key={h.path}>
                 <Box width={3}><Text color={on ? COLORS.violet : TEXT.dim}>{on ? "› " : "  "}</Text></Box>
@@ -681,6 +694,7 @@ function LootStep({ hands, sel, busy }: { hands: Handshake[]; sel: number; busy:
             );
           })
         )}
+        {handMore > 0 ? <Text color={TEXT.dim}>  +{handMore} more — ↑/↓ to scroll</Text> : null}
         <Box marginTop={1}>
           <Text color={busy ? TEXT.dim : COLORS.amber}>{busy ? "⟳ queuing…" : "[Enter] ⛓ Send to Crack (mode 22000) — engagement-gated"}</Text>
         </Box>

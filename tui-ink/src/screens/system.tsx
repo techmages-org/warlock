@@ -5,8 +5,8 @@
 //            [3] NET (network ifaces)  [4] LOG (journalctl tail)
 // Keys: 1-4 switch tabs, j/k move cursor, o toggle AIO rail or service.
 
-import { Box, Text, useInput } from "ink";
-import { useState } from "react";
+import { Box, Text, useInput, useStdout } from "ink";
+import { useRef, useState } from "react";
 import { ModuleHeader } from "../components/ModuleHeader.js";
 import { StatusLED } from "../components/StatusLED.js";
 import { Tile } from "../components/Tile.js";
@@ -100,12 +100,22 @@ function netLed(iface: NetIface): LEDColor {
   return iface.up ? "mint" : "dim";
 }
 
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function useLive<T>(v: T) {
+  const r = useRef(v);
+  r.current = v;
+  return r;
+}
+
 // ── Screen ───────────────────────────────────────────────────────────────────
 
 type Tab = "hw" | "svc" | "net" | "log";
 
 export function Screen() {
   const api = useApi();
+  const { stdout } = useStdout();
+  const tileW = Math.min((stdout?.columns ?? 120) - 2, 116);
   const [tab, setTab] = useState<Tab>("hw");
   const [cursor, setCursor] = useState(0);
   const [tick, setTick] = useState(0);
@@ -147,10 +157,17 @@ export function Screen() {
   const netList: NetIface[] = netData?.interfaces ?? [];
   const logLines: string[] = logData?.lines ?? [];
 
-  const selHw: [string, AioRail] | undefined = hwRails[cursor];
-  const selSvc: ServiceRow | undefined = svcList[cursor];
+  // Live refs — prevent stale closure in useInput
+  const tabRef = useLive(tab);
+  const cursorRef = useLive(cursor);
+  const hwRailsRef = useLive(hwRails);
+  const svcListRef = useLive(svcList);
+  const netListRef = useLive(netList);
+  const logLinesRef = useLive(logLines);
 
   useInput((input, key) => {
+    const curTab = tabRef.current;
+
     // Tab switching (1-4)
     if (input === "1") { setTab("hw"); setCursor(0); setMsg(null); return; }
     if (input === "2") { setTab("svc"); setCursor(0); setMsg(null); return; }
@@ -159,10 +176,10 @@ export function Screen() {
 
     // Cursor movement
     const listLen =
-      tab === "hw" ? hwRails.length :
-      tab === "svc" ? svcList.length :
-      tab === "net" ? netList.length :
-      logLines.length;
+      curTab === "hw" ? hwRailsRef.current.length :
+      curTab === "svc" ? svcListRef.current.length :
+      curTab === "net" ? netListRef.current.length :
+      logLinesRef.current.length;
 
     if (key.upArrow || input === "k") {
       setCursor(c => Math.max(0, c - 1));
@@ -173,21 +190,28 @@ export function Screen() {
       return;
     }
 
-    // Actions
+    // Actions — derive selHw/selSvc inside handler from refs
     if (input === "o") {
-      if (tab === "hw" && selHw) {
-        const [railName, rail] = selHw;
-        const action = rail.level === 1 ? "off" : "on";
-        void api
-          .post(`/api/system/aio/${railName}/${action}`)
-          .then(() => { setTick(t => t + 1); setMsg(`${railName} → ${action.toUpperCase()}`); })
-          .catch((e: unknown) => setMsg(`ERR: ${e instanceof Error ? e.message : String(e)}`));
-      } else if (tab === "svc" && selSvc) {
-        const action = selSvc.activestate === "active" ? "stop" : "start";
-        void api
-          .post(`/api/system/services/${selSvc.unit}/${action}`)
-          .then(() => { setTick(t => t + 1); setMsg(`${selSvc.unit} → ${action}`); })
-          .catch((e: unknown) => setMsg(`ERR: ${e instanceof Error ? e.message : String(e)}`));
+      const cur = cursorRef.current;
+      if (curTab === "hw") {
+        const selHw = hwRailsRef.current[cur];
+        if (selHw) {
+          const [railName, rail] = selHw;
+          const action = rail.level === 1 ? "off" : "on";
+          void api
+            .post(`/api/system/aio/${railName}/${action}`)
+            .then(() => { setTick(t => t + 1); setMsg(`${railName} → ${action.toUpperCase()}`); })
+            .catch((e: unknown) => setMsg(`ERR: ${e instanceof Error ? e.message : String(e)}`));
+        }
+      } else if (curTab === "svc") {
+        const selSvc = svcListRef.current[cur];
+        if (selSvc) {
+          const action = selSvc.activestate === "active" ? "stop" : "start";
+          void api
+            .post(`/api/system/services/${selSvc.unit}/${action}`)
+            .then(() => { setTick(t => t + 1); setMsg(`${selSvc.unit} → ${action}`); })
+            .catch((e: unknown) => setMsg(`ERR: ${e instanceof Error ? e.message : String(e)}`));
+        }
       }
     }
   });
@@ -251,7 +275,7 @@ export function Screen() {
 
       {/* Tab content */}
       {tab === "hw" && (
-        <Tile title="AIO / GPIO RAILS" led={aioData ? "mint" : "dim"} width={116}>
+        <Tile title="AIO / GPIO RAILS" led={aioData ? "mint" : "dim"} width={tileW}>
           {!aioData ? (
             <Text color={TEXT.dim}>loading rails…</Text>
           ) : hwRails.length === 0 ? (
@@ -277,7 +301,7 @@ export function Screen() {
       )}
 
       {tab === "svc" && (
-        <Tile title="SYSTEMD SERVICES" led={svcData ? "mint" : "dim"} width={116}>
+        <Tile title="SYSTEMD SERVICES" led={svcData ? "mint" : "dim"} width={tileW}>
           {!svcData ? (
             <Text color={TEXT.dim}>loading services…</Text>
           ) : svcList.length === 0 ? (
@@ -306,7 +330,7 @@ export function Screen() {
       )}
 
       {tab === "net" && (
-        <Tile title="NETWORK INTERFACES" led={netData ? "mint" : "dim"} width={116}>
+        <Tile title="NETWORK INTERFACES" led={netData ? "mint" : "dim"} width={tileW}>
           {!netData ? (
             <Text color={TEXT.dim}>loading interfaces…</Text>
           ) : netList.length === 0 ? (
@@ -342,7 +366,7 @@ export function Screen() {
       )}
 
       {tab === "log" && (
-        <Tile title="JOURNAL TAIL" led={logData ? "mint" : "dim"} width={116}>
+        <Tile title="JOURNAL TAIL" led={logData ? "mint" : "dim"} width={tileW}>
           {!logData ? (
             <Text color={TEXT.dim}>loading journal…</Text>
           ) : logLines.length === 0 ? (

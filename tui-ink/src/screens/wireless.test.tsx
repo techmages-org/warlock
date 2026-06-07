@@ -161,6 +161,53 @@ describe("Wireless flagship screen", () => {
     unmount();
   });
 
+  it("windowOf keeps selected AP visible when scrolling past the 6-row cap", async () => {
+    // Build 8 APs — selection past row 6 exposed the slice(0,6) bug where
+    // the '›' indicator was never rendered (hidden selection).
+    const manyAps = Array.from({ length: 8 }, (_, i) => ({
+      bssid: `AA:BB:CC:DD:EE:${String(i + 1).padStart(2, "0")}`,
+      essid: `Net-${i + 1}`,
+      channel: (i % 11) + 1,
+      encryption: "WPA2",
+      signal: -(50 + i),
+      wps: false,
+    }));
+    const ctx = mockContext(true);
+    (ctx.api.get as ReturnType<typeof vi.fn>).mockImplementation(async (path: string) => {
+      if (path.includes("/api/wifi_recon/status")) return STATUS as unknown;
+      if (path.includes("/api/wifi_recon/aps")) return { aps: manyAps } as unknown;
+      if (path.includes("/api/wifi_recon/clients")) return { clients: [] } as unknown;
+      if (path.includes("/api/wifi_recon/handshakes")) return { handshakes: [] } as unknown;
+      if (path.includes("/api/engagements/active")) return { mode: "on", engagement_id: "e1", name: "Test", scope: { ssids: [], bssids: [], ip_ranges: [] }, started_at: null } as unknown;
+      throw new Error(`unexpected GET ${path}`);
+    });
+    const { lastFrame, stdin, unmount } = render(
+      <WarlockProvider value={ctx}>
+        <Wireless />
+      </WarlockProvider>,
+    );
+    await vi.waitFor(() => expect(lastFrame()).toContain("ARM THE RADIO"));
+    stdin.write("2"); // → RECON
+    await vi.waitFor(() => expect(lastFrame()).toContain("Net-1"));
+
+    // Navigate down 7 times to select the 8th AP
+    for (let i = 0; i < 7; i++) {
+      stdin.write(DOWN);
+      await vi.waitFor(() => {}, { timeout: 100 });
+    }
+    // The 8th AP should be visible with the '›' cursor
+    await vi.waitFor(() => {
+      const frame = lastFrame()!;
+      return frame.includes("Net-8") && /›\s+AA:BB:CC:DD:EE:08/.test(frame);
+    }, { timeout: 2000 });
+    const frame = lastFrame()!;
+    expect(frame).toContain("Net-8");
+    expect(frame).toMatch(/›\s+AA:BB:CC:DD:EE:08/);
+    // Also confirm the '+N more' indicator appears when scrolled
+    expect(frame).toContain("+");
+    unmount();
+  });
+
   it("shows an error tile when the recon status endpoint fails", async () => {
     const ctx = mockContext(true);
     (ctx.api.get as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("boom"));

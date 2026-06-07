@@ -48,6 +48,55 @@ describe("Audio screen", () => {
     unmount();
   });
 
+  it("switches to INPUT SOURCES view on key '2'", async () => {
+    const { lastFrame, stdin, unmount } = render(
+      <WarlockProvider value={mockContext()}>
+        <Screen />
+      </WarlockProvider>,
+    );
+    await vi.waitFor(() => expect(lastFrame()).toContain("alsa_output.pci"));
+    stdin.write("2"); // → sources view
+    await vi.waitFor(() => expect(lastFrame()).toContain("INPUT SOURCES"));
+    expect(lastFrame()).toContain("alsa_input.pci");
+    unmount();
+  });
+
+  it("calls set-default API when 'd' is pressed", async () => {
+    const ctx = mockContext();
+    const { lastFrame, stdin, unmount } = render(
+      <WarlockProvider value={ctx}>
+        <Screen />
+      </WarlockProvider>,
+    );
+    await vi.waitFor(() => expect(lastFrame()).toContain("alsa_output.pci"));
+    stdin.write("d"); // set default on selected (id=47)
+    await vi.waitFor(() =>
+      (ctx.api.post as ReturnType<typeof vi.fn>).mock.calls.some(
+        (c: unknown[]) => String(c[0]).includes("/api/audio/default")
+      )
+    );
+    expect(ctx.api.post).toHaveBeenCalledWith("/api/audio/default", expect.objectContaining({ id: 47 }));
+    unmount();
+  });
+
+  it("calls mute API when 'm' is pressed", async () => {
+    const ctx = mockContext();
+    const { lastFrame, stdin, unmount } = render(
+      <WarlockProvider value={ctx}>
+        <Screen />
+      </WarlockProvider>,
+    );
+    await vi.waitFor(() => expect(lastFrame()).toContain("alsa_output.pci"));
+    stdin.write("m"); // mute the selected sink (id=47, currently unmuted)
+    await vi.waitFor(() =>
+      (ctx.api.post as ReturnType<typeof vi.fn>).mock.calls.some(
+        (c: unknown[]) => String(c[0]).includes("/api/audio/mute")
+      )
+    );
+    expect(ctx.api.post).toHaveBeenCalledWith("/api/audio/mute", expect.objectContaining({ id: 47, muted: true }));
+    unmount();
+  });
+
   it("shows acquiring state before data arrives", () => {
     const api: ApiClient = {
       baseUrl: "http://test",

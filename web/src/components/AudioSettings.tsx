@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import clsx from "clsx";
 import { Tile, StatusLED } from "./hud";
+import { apiGet, apiPost } from "../lib/api";
 
 type AudioDevice = {
   id: number;
@@ -15,17 +16,6 @@ type AudioStatus = {
   sources: AudioDevice[];
 };
 
-const auth = "Basic " + btoa("warlock:warlock");
-
-async function api<T = any>(path: string, init?: RequestInit): Promise<T> {
-  const r = await fetch(path, {
-    ...init,
-    headers: { "Content-Type": "application/json", Authorization: auth, ...(init?.headers || {}) },
-  });
-  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
-  return r.json();
-}
-
 export function AudioSettings() {
   const [data, setData] = useState<AudioStatus | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -33,7 +23,7 @@ export function AudioSettings() {
 
   const refresh = useCallback(async () => {
     try {
-      const r = await api<AudioStatus>("/api/audio/devices");
+      const r = await apiGet<AudioStatus>("/api/audio/devices");
       setData(r);
       setErr(null);
     } catch (e: any) {
@@ -50,7 +40,7 @@ export function AudioSettings() {
   const setDefault = async (id: number) => {
     setBusy(`default-${id}`);
     try {
-      await api("/api/audio/default", { method: "POST", body: JSON.stringify({ id }) });
+      await apiPost("/api/audio/default", { id });
       await refresh();
     } catch (e: any) {
       setErr(String(e));
@@ -61,7 +51,7 @@ export function AudioSettings() {
 
   const setVolume = async (id: number, volume: number) => {
     try {
-      await api("/api/audio/volume", { method: "POST", body: JSON.stringify({ id, volume }) });
+      await apiPost("/api/audio/volume", { id, volume });
       // optimistic update
       setData((d) =>
         d
@@ -80,7 +70,7 @@ export function AudioSettings() {
   const setMute = async (id: number, muted: boolean) => {
     setBusy(`mute-${id}`);
     try {
-      await api("/api/audio/mute", { method: "POST", body: JSON.stringify({ id, muted }) });
+      await apiPost("/api/audio/mute", { id, muted });
       await refresh();
     } catch (e: any) {
       setErr(String(e));
@@ -92,7 +82,7 @@ export function AudioSettings() {
   const playTest = async (id?: number) => {
     setBusy(`test-${id ?? "default"}`);
     try {
-      await api("/api/audio/test", { method: "POST", body: JSON.stringify({ id: id ?? null }) });
+      await apiPost("/api/audio/test", { id: id ?? null });
     } catch (e: any) {
       setErr(String(e));
     } finally {
