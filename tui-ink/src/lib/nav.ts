@@ -12,6 +12,7 @@ export type NavKey = { id: string; key: string };
 // id → second key of the `g <key>` chord.
 export const NAV_KEYS: Record<string, string> = {
   dashboard: "d",
+  agent: "b", // pinned AI assistant ("bot"); frontend-only, not a backend module
   wireless: "f", // pinned guided flow (W0-assigned; not in Textual)
   wifi_recon: "w",
   wifi_offensive: "o",
@@ -34,6 +35,15 @@ export const PINNED_WIRELESS = {
   id: "wireless",
   label: "Wireless",
   icon: "⌖",
+  requires_engagement: false,
+  requires_root: false,
+};
+
+// The pinned, frontend-only AI assistant entry (no /api/modules backing).
+export const PINNED_AGENT = {
+  id: "agent",
+  label: "Assistant",
+  icon: "✦",
   requires_engagement: false,
   requires_root: false,
 };
