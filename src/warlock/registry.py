@@ -19,6 +19,7 @@ TAB_ORDER: list[str] = [
     "wifi_offensive",
     "crack",
     "net_recon",
+    "netdiag",
     "sdr_offensive",
     "esp32_companion",
     "wireless_ids",
