@@ -46,10 +46,17 @@ Interfaces: `eth0` **NO-CARRIER** (no cable) · `wlan0` UP (active) · `wlan1` D
 
 ## 3. ⛔ Blockers (operator) — surfaced per the contract tripwire
 
-1. **`eth0` has no link.** The wired A1 checks (link speed/duplex, LLDP/CDP, VLAN, wired DHCP) can't
-   be verified on the real deck until **eth0 is patched into a live switch port** (or a confirmed
-   USB-Ethernet adapter is used). Everything else (wlan-side gateway/DHCP/DNS health, ping/TCP,
-   path-MTU, latency/jitter, iperf3) is verifiable over `wlan0` now.
+1. **No usable wired Ethernet port — RESOLVED as a HARDWARE FINDING (2026-06-07).** `eth0` is the
+   CM5 on-SoC MAC (driver `macb`, `bus-info 1f00100000.ethernet`) but it has **no carrier, ever, and
+   advertises only 10baseT** = a MAC with **no functional PHY/RJ45 wired to it** on this uConsole.
+   Patching a cable into a switch does nothing for it (verified: carrier stays 0 after `ip link set
+   eth0 up`). No USB-Ethernet adapter attached (only USB device = the RTL-SDR `0bda:2838`). `netdiag`
+   *correctly* reports `carrier:false / link_detected:false` — honest, not a bug.
+   → **A2 BOM item:** a **USB-Ethernet adapter (RTL8153 / AX88179-class, USB3 GbE)**. Plug it in → new
+   iface (cdc_ether/r8152/ax88) → `netdiag` tests real link speed/duplex + **LLDP nearest-switch +
+   port + VLAN** immediately. Until then the wired-only checks are **built + correct but unverifiable
+   on this hardware**. Wlan-side checks (gateway/DHCP/DNS/ping/path-MTU/latency/jitter/iperf3) verified
+   live over `wlan0`.
 2. **Tool install consent.** Confirm `sudo apt install ethtool lldpd iw mtr-tiny dnsutils arp-scan`
    on the deck (contract-named tools; reversible). Proceeding under autonomy unless told otherwise.
 
