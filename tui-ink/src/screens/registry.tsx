@@ -9,6 +9,7 @@
 import type { ComponentType } from "react";
 
 import { Screen as Dashboard } from "./dashboard.js";
+import { Screen as Agent } from "./agent.js";
 import { Screen as Wireless } from "./wireless.js";
 import { Screen as WifiRecon } from "./wifi_recon.js";
 import { Screen as WifiOffensive } from "./wifi_offensive.js";
@@ -31,6 +32,7 @@ export type ScreenComponent = ComponentType;
 
 export const SCREENS: Record<string, ScreenComponent> = {
   dashboard: Dashboard,
+  agent: Agent,
   wireless: Wireless,
   wifi_recon: WifiRecon,
   wifi_offensive: WifiOffensive,

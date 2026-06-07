@@ -6,7 +6,7 @@
 import { Box, Text } from "ink";
 import { useEffect, useState } from "react";
 import { useApi } from "../context.js";
-import { keyFor, PINNED_WIRELESS } from "../lib/nav.js";
+import { keyFor, PINNED_AGENT, PINNED_WIRELESS } from "../lib/nav.js";
 import { COLORS, TEXT } from "../lib/theme.js";
 import type { ModuleInfo } from "../lib/types.js";
 
@@ -29,7 +29,7 @@ export function Nav({ activeId }: { activeId: string }) {
     };
   }, [api]);
 
-  const entries: ModuleInfo[] = [PINNED_WIRELESS, ...modules];
+  const entries: ModuleInfo[] = [PINNED_AGENT, PINNED_WIRELESS, ...modules];
 
   return (
     <Box flexWrap="wrap">
