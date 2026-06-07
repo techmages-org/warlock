@@ -548,6 +548,19 @@ class AuditJob:
 # --------------------------------------------------------------------------- #
 # Audit + engagement gate (mirrors crack._gate / runner.submit exactly).
 # --------------------------------------------------------------------------- #
+def _emit_aar(kind: str, command: str, target: str, note: str, outcome: str) -> None:
+    """Best-effort AAR proof for this audit event (lazy import + fully guarded;
+    never breaks the audit write)."""
+    try:
+        from warlock import aar
+
+        aar.safe_emit_for_audit(
+            kind=kind, command=command, target=target, note=note, outcome=outcome
+        )
+    except Exception:  # noqa: BLE001 — AAR is additive
+        log.warning("AAR emit hook failed (non-fatal) for %s", kind, exc_info=True)
+
+
 def _audit(kind: str, command: str, target: str, note: str, outcome: str) -> None:
     with session_scope() as s:
         s.add(
@@ -561,6 +574,7 @@ def _audit(kind: str, command: str, target: str, note: str, outcome: str) -> Non
                 outcome=outcome,
             )
         )
+    _emit_aar(kind, command, target, note, outcome)
 
 
 async def _gate(*, remote: bool, command: str, target: str, scope_target: str, note: str) -> None:

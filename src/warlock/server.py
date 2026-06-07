@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.requests import HTTPConnection
 
 from warlock import __version__
+from warlock.api import aar as aar_api
 from warlock.api import engagements as engagements_api
 from warlock.api import health as health_api
 from warlock.api import ws as ws_api
@@ -96,7 +97,12 @@ def create_app() -> FastAPI:
     # Core API routers.
     app.include_router(health_api.router, dependencies=[Depends(_check_auth)])
     app.include_router(engagements_api.router, dependencies=[Depends(_check_auth)])
+    # GET /api/ws-token is Basic-auth-gated (mints the browser's /ws token);
+    # the /ws upgrade itself authenticates per-socket (Basic header OR ?token=).
+    app.include_router(ws_api.token_router, dependencies=[Depends(_check_auth)])
     app.include_router(ws_api.router)  # auth handled per-socket
+    # AAR read API (records / preimage custody / did.json) — Basic-auth gated.
+    app.include_router(aar_api.router, dependencies=[Depends(_check_auth)])
 
     # Module routers.
     modules = load_modules()

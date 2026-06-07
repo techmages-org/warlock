@@ -24,6 +24,8 @@ dependencies = [
     "python-multipart>=0.0.12",
     "pyyaml>=6.0",
     "meshtastic>=2.5",
+    "cryptography>=44.0",
+    "rfc8785>=0.1.4",
 ]
 
 [project.optional-dependencies]

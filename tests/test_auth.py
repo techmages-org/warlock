@@ -167,3 +167,68 @@ def test_ws_accepts_with_credentials_when_flag_on(ws_auth_client):
         hello = ws.receive_json()
         assert hello["name"] == "ws.hello"
         assert hello["payload"]["ok"] is True
+
+
+# --------------------------------------------------------------------------- #
+# /ws signed token — the browser's header-free path. GET /api/ws-token (behind
+# Basic auth) mints a short-lived HMAC token; /ws?token=… is accepted when the
+# WS-auth flag is on.
+# --------------------------------------------------------------------------- #
+def test_ws_token_make_verify_round_trip(monkeypatch):
+    from warlock.config import get_settings
+
+    monkeypatch.setenv("WARLOCK_WEB_PASSWORD", PASSWORD)
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+    from warlock import auth
+
+    tok = auth.make_ws_token()
+    assert auth.verify_ws_token(tok) is True
+    # Expired (negative TTL), tampered, and empty tokens are all rejected.
+    assert auth.verify_ws_token(auth.make_ws_token(ttl=-5)) is False
+    assert auth.verify_ws_token(tok + "x") is False
+    assert auth.verify_ws_token("not-a-token") is False
+    assert auth.verify_ws_token(None) is False
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+
+
+def test_ws_token_signature_is_password_bound(monkeypatch):
+    """A token minted under one password must NOT verify under another."""
+    from warlock.config import get_settings
+
+    monkeypatch.setenv("WARLOCK_WEB_PASSWORD", PASSWORD)
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+    from warlock import auth
+
+    tok = auth.make_ws_token()
+    monkeypatch.setenv("WARLOCK_WEB_PASSWORD", "different-pw")
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+    assert auth.verify_ws_token(tok) is False
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+
+
+def test_ws_token_endpoint_requires_basic(auth_client):
+    # No credentials -> 401 (the mint endpoint is Basic-auth-gated).
+    assert auth_client.get("/api/ws-token").status_code == 401
+    # With credentials -> a token + its TTL.
+    r = auth_client.get("/api/ws-token", headers={"Authorization": _basic(USER, PASSWORD)})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["token"] and isinstance(body["token"], str)
+    assert body["expires_in"] == 60
+
+
+def test_ws_accepts_query_token_when_flag_on(ws_auth_client):
+    # Browser flow: fetch a token (Basic), then connect with ?token=… (no header).
+    tok = ws_auth_client.get(
+        "/api/ws-token", headers={"Authorization": _basic(USER, PASSWORD)}
+    ).json()["token"]
+    with ws_auth_client.websocket_connect(f"/ws?token={tok}") as ws:
+        hello = ws.receive_json()
+        assert hello["name"] == "ws.hello"
+        assert hello["payload"]["ok"] is True
+
+
+def test_ws_rejects_bad_query_token_when_flag_on(ws_auth_client):
+    with pytest.raises(WebSocketDisconnect):
+        with ws_auth_client.websocket_connect("/ws?token=garbage"):
+            pass

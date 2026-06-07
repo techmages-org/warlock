@@ -27,6 +27,9 @@ MESH_PACKET_RX = "mesh.packet.rx"
 GPS_FIX_UPDATED = "gps.fix.updated"
 JOB_STARTED = "job.started"
 JOB_FINISHED = "job.finished"
+# SDR live bus (emitted ~every 3s by the sdr module's on_startup loop).
+SDR_ADSB = "sdr.adsb"      # compact aircraft summary pulled from the readsb feed
+SDR_STATUS = "sdr.status"  # device / readsb / rtl_433 status snapshot
 
 
 class Bus:

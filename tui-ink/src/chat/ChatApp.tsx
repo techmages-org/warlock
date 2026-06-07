@@ -30,7 +30,7 @@ import { Banner, Capabilities } from "../components/Banner.js";
 import { BrailleSpinner } from "../components/BrailleSpinner.js";
 import { Markdown } from "../components/Markdown.js";
 import { SlashMenu, type SlashCommand } from "../components/SlashMenu.js";
-import { READ_ENDPOINTS, type AgentRunner } from "../lib/agent.js";
+import { ACTION_ENDPOINTS, isActionToolName, READ_ENDPOINTS, type AgentRunner } from "../lib/agent.js";
 import { COLORS, TEXT } from "../lib/theme.js";
 
 export interface ChatAppProps {
@@ -46,11 +46,11 @@ type LogItem =
   | { id: string; kind: "header" }
   | { id: string; kind: "welcome" }
   | { id: string; kind: "info"; title: string; body: string; width: number }
-  | { id: string; kind: "exchange"; user: string; assistant: string; error: boolean; width: number };
+  | { id: string; kind: "exchange"; user: string; assistant: string; error: boolean; width: number; tools: string[] };
 
 const COMMANDS: SlashCommand[] = [
   { name: "/help", desc: "show available commands" },
-  { name: "/tools", desc: "list the read-only tools" },
+  { name: "/tools", desc: "list read + gated action tools" },
   { name: "/model", desc: "show provider / model" },
   { name: "/clear", desc: "clear the conversation view" },
   { name: "/quit", desc: "exit warlock-chat" },
@@ -59,16 +59,38 @@ const COMMANDS: SlashCommand[] = [
 const HELP_MD = [
   "**Commands**",
   "- `/help` — show this list",
-  "- `/tools` — list the read-only tools I can call",
+  "- `/tools` — list the read + gated action tools I can call",
   "- `/model` — show the configured provider / model",
   "- `/clear` — clear the conversation view",
   "- `/quit` — exit warlock-chat",
   "",
-  "Otherwise just type a question. I read live deck state (read-only) and guide you;",
-  "you press the keys. Tip: `g e` operations · `g f` wireless · `g c` crack.",
+  "Otherwise just type a question. I read live deck state and — within an ACTIVE",
+  "engagement — drive in-scope ops for you (the backend gate authorizes each). Ask me to",
+  "\"get started\" and I'll walk you through arming one. Tip: `g e` ops · `g f` wireless · `g c` crack.",
 ].join("\n");
 
-function ExchangeView({ user, assistant, error, width }: { user: string; assistant: string; error: boolean; width: number }) {
+function ToolTrace({ tools, width }: { tools: string[]; width: number }) {
+  if (!tools.length) return null;
+  // Action tools get ⚙ + amber, reads get ↯ + dim — operator sees what was DONE
+  // vs merely observed. One compact line, truncated to width.
+  const parts = tools.map((t) => `${isActionToolName(t) ? "⚙" : "↯"} ${t}`);
+  let line = parts.join("  ");
+  const max = Math.max(20, width - 6);
+  if (line.length > max) line = `${line.slice(0, max - 1)}…`;
+  const hasAction = tools.some(isActionToolName);
+  return (
+    <Box>
+      <Box width={5}>
+        <Text color={TEXT.dim}>     </Text>
+      </Box>
+      <Box flexGrow={1}>
+        <Text color={hasAction ? COLORS.amber : TEXT.dim}>{line}</Text>
+      </Box>
+    </Box>
+  );
+}
+
+function ExchangeView({ user, assistant, error, width, tools }: { user: string; assistant: string; error: boolean; width: number; tools: string[] }) {
   return (
     <Box flexDirection="column" marginTop={1}>
       <Box>
@@ -81,6 +103,7 @@ function ExchangeView({ user, assistant, error, width }: { user: string; assista
           </Text>
         </Box>
       </Box>
+      <ToolTrace tools={tools} width={width} />
       <Box>
         <Box width={5}>
           <Text color={error ? COLORS.pink : COLORS.mint}>{error ? "err " : "war "}</Text>
@@ -170,12 +193,24 @@ export function ChatApp({ runner, provider = "", model, version = "0.1.0", missi
       return;
     }
     if (cmd === "/tools") {
-      const toolList = READ_ENDPOINTS.map((e) => `- \`${e.name}\` — ${e.description}`).join("\n");
-      pushInfo("tools (18 read-only)", toolList);
+      const reads = READ_ENDPOINTS.map((e) => `- ↯ \`${e.name}\` — ${e.description}`).join("\n");
+      const actions = ACTION_ENDPOINTS.map(
+        (e) => `- ⚙ \`${e.name}\`${e.gated ? " *(gated)*" : ""} — ${e.description}`,
+      ).join("\n");
+      const body = [
+        `**Read-only (${READ_ENDPOINTS.length})** — observe live state, always safe:`,
+        reads,
+        "",
+        `**Guided** — \`guided_engagement_setup\` walks you through arming an engagement.`,
+        "",
+        `**Actions (${ACTION_ENDPOINTS.length})** — POST to the same gated endpoints the UI calls; the backend engagement gate authorizes each:`,
+        actions,
+      ].join("\n");
+      pushInfo(`tools — ${READ_ENDPOINTS.length} read · ${ACTION_ENDPOINTS.length} action · 1 guided`, body);
       return;
     }
     if (cmd === "/model") {
-      pushInfo("model", `**${providerModel}** · v${version} · read-only`);
+      pushInfo("model", `**${providerModel}** · v${version} · gated actions (engagement-enforced)`);
       return;
     }
     if (cmd === "/help") {
@@ -190,19 +225,27 @@ export function ChatApp({ runner, provider = "", model, version = "0.1.0", missi
     setBusy(true);
     setTool(null);
     const startedAt = Date.now();
+    const toolsUsed: string[] = [];
     let answer = "";
     let errored = false;
     try {
       // No onDelta: we do NOT live-render the growing answer (that grew the
       // dynamic region → flood). Spinner while working, commit once on done.
-      answer = await runnerRef.current.ask(q, { onToolCall: (n) => setTool(n) });
+      // We DO record each tool call so the committed exchange shows what the
+      // agent observed (↯) and did (⚙).
+      answer = await runnerRef.current.ask(q, {
+        onToolCall: (n) => {
+          setTool(n);
+          toolsUsed.push(n);
+        },
+      });
     } catch (e: unknown) {
       errored = true;
       answer = e instanceof Error ? e.message : String(e);
     } finally {
       setLog((l) => [
         ...l,
-        { id: nextId(), kind: "exchange", user: q, assistant: errored ? answer : answer || "(empty answer)", error: errored, width: colsRef.current },
+        { id: nextId(), kind: "exchange", user: q, assistant: errored ? answer : answer || "(empty answer)", error: errored, width: colsRef.current, tools: toolsUsed },
       ]);
       setLastMs(Date.now() - startedAt);
       setTool(null);
@@ -254,7 +297,7 @@ export function ChatApp({ runner, provider = "", model, version = "0.1.0", missi
                     <Text color={COLORS.violet}>✦ WaRL0c Assistant</Text>
                     <Text color={TEXT.dim}>
                       {" "}
-                      · v{version} · {providerModel} · read-only · type / for commands
+                      · v{version} · {providerModel} · gate-enforced · type / for commands
                     </Text>
                   </Text>
                   {missing.length ? (
@@ -272,7 +315,7 @@ export function ChatApp({ runner, provider = "", model, version = "0.1.0", missi
               return <InfoView key={item.id} title={item.title} body={item.body} width={item.width} />;
             case "exchange":
               return (
-                <ExchangeView key={item.id} user={item.user} assistant={item.assistant} error={item.error} width={item.width} />
+                <ExchangeView key={item.id} user={item.user} assistant={item.assistant} error={item.error} width={item.width} tools={item.tools} />
               );
           }
         }}
@@ -287,8 +330,11 @@ export function ChatApp({ runner, provider = "", model, version = "0.1.0", missi
 
         {busy ? (
           <Text>
-            <BrailleSpinner name="braille" color={COLORS.cyan} />
-            <Text color={TEXT.dim}> {tool ? `reading ${tool}…` : "working…"}</Text>
+            <BrailleSpinner name="braille" color={tool && isActionToolName(tool) ? COLORS.amber : COLORS.cyan} />
+            <Text color={TEXT.dim}>
+              {" "}
+              {tool ? `${isActionToolName(tool) ? "running" : "reading"} ${tool}…` : "working…"}
+            </Text>
           </Text>
         ) : null}
 
@@ -311,7 +357,7 @@ export function ChatApp({ runner, provider = "", model, version = "0.1.0", missi
         </Box>
 
         <Text color={TEXT.dim}>
-          {providerModel} · read-only · {turns} turn{turns === 1 ? "" : "s"} ·{" "}
+          {providerModel} · gate-enforced · {turns} turn{turns === 1 ? "" : "s"} ·{" "}
           {lastMs != null ? `last ${lastMs}ms` : "ready"} · Ctrl+C quit
         </Text>
       </Box>

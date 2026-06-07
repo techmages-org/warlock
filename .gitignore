@@ -43,3 +43,7 @@ HANDOFF.md
 ORCHESTRATION.md
 # TUI agent provider key (Z.AI / OpenAI-compatible) — operator-local, never push
 agent.env
+# Local reference assets (SDR Big Book PDF, device dumps) — operator-local, keep out of git history
+assets/
+# Vendored conformance oracle (AAR reference verifier) — cloned locally, never push
+vendor/

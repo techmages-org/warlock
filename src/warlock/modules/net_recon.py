@@ -106,6 +106,19 @@ def _sha256(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 
+def _emit_aar(kind: str, command: str, target: str, note: str, outcome: str) -> None:
+    """Best-effort AAR proof for this audit event (lazy import + fully guarded;
+    never breaks the audit write)."""
+    try:
+        from warlock import aar
+
+        aar.safe_emit_for_audit(
+            kind=kind, command=command, target=target, note=note, outcome=outcome
+        )
+    except Exception:  # noqa: BLE001 — AAR is additive
+        log.warning("AAR emit hook failed (non-fatal) for %s", kind, exc_info=True)
+
+
 def _audit(kind: str, command: str, target: str, note: str, outcome: str) -> None:
     """Write a durable AuditEntry row (chain-of-custody) — mirrors crack._audit /
     server_audit._audit exactly so portscans share the same forensic trail."""
@@ -121,6 +134,7 @@ def _audit(kind: str, command: str, target: str, note: str, outcome: str) -> Non
                 outcome=outcome,
             )
         )
+    _emit_aar(kind, command, target, note, outcome)
 
 
 def _is_rfc1918(target: str) -> bool:

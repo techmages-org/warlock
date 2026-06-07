@@ -95,6 +95,35 @@ describe("ChatApp flood-fix", () => {
     unmount();
   });
 
+  it("labels an ACTION tool with 'running' in-flight and commits a ⚙ tool-trace", async () => {
+    let resolveAsk!: (v: string) => void;
+    const pending = new Promise<string>((res) => {
+      resolveAsk = res;
+    });
+    const runner: AgentRunner = {
+      ask: (_q: string, opts?: AskOptions) => {
+        opts?.onToolCall?.("wifi_deauth"); // an action tool
+        return pending;
+      },
+    };
+    const { lastFrame, stdin, unmount } = renderChat(runner);
+
+    await settle();
+    stdin.write("deauth it");
+    await vi.waitFor(() => expect(lastFrame()).toContain("deauth it"));
+    stdin.write(ENTER);
+
+    // in-flight: action tools say "running", not "reading"
+    await vi.waitFor(() => expect(lastFrame()).toContain("running wifi_deauth"));
+    expect(lastFrame()).not.toContain("reading wifi_deauth");
+
+    resolveAsk("Deauth job queued.");
+    await vi.waitFor(() => expect(lastFrame()).toContain("Deauth job queued."));
+    // the committed exchange shows what the agent DID (⚙ = action)
+    expect(lastFrame()).toContain("⚙ wifi_deauth");
+    unmount();
+  });
+
   it("commits an error entry when the runner fails", async () => {
     const runner: AgentRunner = {
       ask: async () => {

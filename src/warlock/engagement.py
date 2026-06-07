@@ -19,6 +19,18 @@ from warlock.config import get_settings
 log = logging.getLogger("warlock.engagement")
 
 
+def _emit_aar(kind: str, note: str, outcome: str) -> None:
+    """Best-effort AAR proof for an engagement lifecycle event. Lazy-imported +
+    fully guarded (aar imports engagement, so a top-level import would cycle; and
+    a signing error must never break engagement start/stop)."""
+    try:
+        from warlock import aar
+
+        aar.safe_emit_for_audit(kind=kind, command="", target="", note=note, outcome=outcome)
+    except Exception:  # noqa: BLE001 — AAR is additive
+        log.warning("AAR emit hook failed (non-fatal) for %s", kind, exc_info=True)
+
+
 @dataclass
 class ScopeAllowlist:
     ssids: list[str] = field(default_factory=list)
@@ -36,19 +48,38 @@ class ScopeAllowlist:
             return True
         if t in {b.lower() for b in self.bssids}:
             return True
-        # Try IP / CIDR
+        # Bare IP target: in scope iff it falls inside any scope CIDR.
         try:
             ip = ipaddress.ip_address(t)
+        except ValueError:
+            ip = None
+        if ip is not None:
             for cidr in self.ip_ranges:
                 try:
                     if ip in ipaddress.ip_network(cidr, strict=False):
                         return True
                 except ValueError:
                     continue
+            return False
+        # CIDR target: in scope iff it is FULLY CONTAINED by a scope CIDR — so an
+        # in-scope /23 under a /22 scope is allowed (a wider subnet, e.g. a /23
+        # vs a /24 scope, is NOT contained and is correctly denied). subnet_of
+        # raises TypeError across IP versions, so guard on matching versions.
+        try:
+            tnet = ipaddress.ip_network(t, strict=False)
         except ValueError:
-            # Not an IP; try matching the raw CIDR string
-            if t in {c.lower() for c in self.ip_ranges}:
-                return True
+            tnet = None
+        if tnet is not None:
+            for cidr in self.ip_ranges:
+                try:
+                    snet = ipaddress.ip_network(cidr, strict=False)
+                except ValueError:
+                    continue
+                if tnet.version == snet.version and tnet.subnet_of(snet):
+                    return True
+        # Fallback: a non-IP target (or a CIDR typed verbatim into the allowlist).
+        if t in {c.lower() for c in self.ip_ranges}:
+            return True
         return False
 
 
@@ -118,6 +149,7 @@ class EngagementMode:
             )
         )
         self._append_audit("ENGAGEMENT_STARTED", {"name": name})
+        _emit_aar("engagement.started", f"engagement {name!r} id={self.engagement_id}", "started")
         await events.bus.publish(
             events.ENGAGEMENT_STARTED,
             {"engagement_id": self.engagement_id, "name": name, "scope": scope.to_dict()},
@@ -176,6 +208,7 @@ class EngagementMode:
             return
         eid = self.engagement_id
         self._append_audit("ENGAGEMENT_ENDED", {})
+        _emit_aar("engagement.ended", f"engagement id={eid}", "ended")
         self._mode = "off"
         await events.bus.publish(events.ENGAGEMENT_ENDED, {"engagement_id": eid})
         self.engagement_id = None

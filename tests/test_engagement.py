@@ -90,3 +90,59 @@ def test_killswitch_guards_failing_crack_queue(monkeypatch):
     assert calls["audit"] == 1  # audit still cancelled despite the crack failure
     assert line["crack_jobs_cancelled"] == 0  # failed guard -> stayed 0
     assert line["audit_jobs_cancelled"] == 5
+
+
+# --------------------------------------------------------------------------- #
+# ScopeAllowlist.matches — CIDR-vs-CIDR containment fix.
+#
+# The bug: a CIDR *target* (e.g. an in-scope /23) only matched a scope CIDR by
+# EXACT string, so a /23 fully inside a /22 scope was wrongly refused. The fix
+# adds an ipaddress subnet_of() branch while preserving IP-in-CIDR + exact-host.
+# --------------------------------------------------------------------------- #
+def test_scope_subnet_in_wider_cidr_is_allowed():
+    from warlock.engagement import ScopeAllowlist
+
+    scope = ScopeAllowlist(ip_ranges=["10.0.0.0/22"])
+    # 10.0.2.0/23 (10.0.2.0–10.0.3.255) is fully inside 10.0.0.0/22.
+    assert scope.matches("10.0.2.0/23") is True
+    # A network is a subnet of itself.
+    assert ScopeAllowlist(ip_ranges=["10.0.0.0/23"]).matches("10.0.0.0/23") is True
+
+
+def test_scope_wider_subnet_is_denied():
+    from warlock.engagement import ScopeAllowlist
+
+    scope = ScopeAllowlist(ip_ranges=["10.0.0.0/24"])
+    # A /23 is BIGGER than the /24 scope -> not contained -> denied.
+    assert scope.matches("10.0.0.0/23") is False
+    # A sibling /24 outside the scope is also denied.
+    assert scope.matches("10.0.1.0/24") is False
+
+
+def test_scope_host_in_cidr_still_matches():
+    from warlock.engagement import ScopeAllowlist
+
+    scope = ScopeAllowlist(ip_ranges=["192.168.1.0/24"])
+    assert scope.matches("192.168.1.50") is True   # bare IP inside the CIDR
+    assert scope.matches("10.0.0.1") is False        # bare IP outside all CIDRs
+
+
+def test_scope_ssid_bssid_and_exact_string_still_match():
+    from warlock.engagement import ScopeAllowlist
+
+    scope = ScopeAllowlist(
+        ssids=["CorpWiFi"], bssids=["AA:BB:CC:DD:EE:FF"], ip_ranges=["lab-net"]
+    )
+    assert scope.matches("corpwifi") is True            # case-insensitive SSID
+    assert scope.matches("aa:bb:cc:dd:ee:ff") is True   # BSSID
+    assert scope.matches("lab-net") is True             # non-IP exact-string range
+    assert scope.matches("") is False                    # empty target never matches
+
+
+def test_scope_mixed_ip_version_does_not_crash():
+    from warlock.engagement import ScopeAllowlist
+
+    # subnet_of() raises TypeError across IP versions; the version guard must
+    # skip the comparison (not crash) and fall through to a clean deny.
+    scope = ScopeAllowlist(ip_ranges=["10.0.0.0/22"])
+    assert scope.matches("2001:db8::/48") is False

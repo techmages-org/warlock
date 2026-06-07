@@ -8,28 +8,48 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from warlock import events
-from warlock.auth import check_basic_auth
+from warlock.auth import WS_TOKEN_TTL, check_basic_auth, make_ws_token, verify_ws_token
 from warlock.config import get_settings
 
 log = logging.getLogger("warlock.ws")
 router = APIRouter(tags=["ws"])
 
+# Token-mint endpoint lives on its own router so the server can mount it WITH the
+# HTTP Basic-auth dependency, while the /ws upgrade router stays auth-free (the
+# handshake authenticates itself per-socket below).
+token_router = APIRouter(tags=["ws"])
+
 # WebSocket close code for an authentication failure (RFC 6455 policy violation).
 _WS_POLICY_VIOLATION = 1008
 
 
+@token_router.get("/api/ws-token")
+def ws_token() -> dict:
+    """Mint a short-lived signed token for a browser /ws handshake.
+
+    Behind HTTP Basic auth (mounted with the ``_check_auth`` dependency). The
+    browser fetches this, then connects to ``/ws?token=<token>`` — its only way
+    to authenticate the bus, since the WebSocket API can't set an Authorization
+    header. TTL is short (``WS_TOKEN_TTL`` seconds); the client refetches.
+    """
+    return {"token": make_ws_token(), "expires_in": WS_TOKEN_TTL}
+
+
 @router.websocket("/ws")
 async def ws_events(ws: WebSocket) -> None:
-    # /ws auth is OPT-IN (WARLOCK_WS_AUTH, default OFF). The browser WebSocket API
-    # cannot set an Authorization header, so enforcing by default would 403 the web
-    # event bus into a reconnect loop. When enabled (and a password is set), the
-    # handshake requires the SAME HTTP Basic credential as every HTTP endpoint —
-    # rejected (close before accept → HTTP 403 on the upgrade) when missing/wrong.
-    # The TUI client already sends the header; the web client needs a header-free
-    # path before this is flipped on.
+    # /ws auth is enforced by default (WARLOCK_WS_AUTH, default ON) whenever a
+    # web password is set. The browser WebSocket API cannot send an Authorization
+    # header, so the handshake is accepted with EITHER a valid HTTP Basic header
+    # (the TUI client) OR a valid ?token=… query param minted by GET /api/ws-token
+    # (the browser). Neither/invalid → close before accept (1008 policy violation
+    # → HTTP 403 on the upgrade). When no password is set, auth is fully disabled
+    # (open LAN deck) exactly as before.
     settings = get_settings()
     if settings.web_ws_auth and settings.web_password:
-        if not check_basic_auth(ws.headers.get("authorization")):
+        authorized = check_basic_auth(ws.headers.get("authorization"))
+        if not authorized:
+            authorized = verify_ws_token(ws.query_params.get("token"))
+        if not authorized:
             log.warning("ws: rejected unauthenticated handshake from %s", ws.client)
             await ws.close(code=_WS_POLICY_VIOLATION)
             return
