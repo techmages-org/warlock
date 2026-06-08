@@ -137,6 +137,25 @@ function bar(fill01: number, width: number): { filled: string; empty: string } {
   return { filled: "█".repeat(n), empty: "░".repeat(width - n) };
 }
 
+// Geiger-tick cadence: stronger signal → faster ticks. Linear map over a clamped
+// RSSI window — -90 dBm → 1300 ms (slow blips), -35 dBm → 110 ms (fast chatter).
+// Pure + exported so the mapping is unit-tested without a TTY.
+export function geigerIntervalMs(rssi: number): number {
+  const r = clamp(rssi, -90, -35);
+  return Math.round(1300 + ((r + 90) / 55) * (110 - 1300));
+}
+
+// Terminal bell, written DIRECTLY to the real stdout — never through Ink's render
+// tree (a BEL is non-printing, so it rings without disturbing the frame). Guarded
+// on isTTY so headless test/CI runs and piped stdout stay silent; the deck is a TTY.
+function emitBell(): void {
+  try {
+    if (process.stdout.isTTY) process.stdout.write("\x07");
+  } catch {
+    /* stdout gone — ignore */
+  }
+}
+
 // Flatten per-band channel maps into a single bounded row list (band headers +
 // channel rows interleaved) so the whole thing windows like any other list.
 type ChanRow =
@@ -300,16 +319,14 @@ export function Screen() {
   useEffect(() => {
     if (view !== "locate" || !locateActive) return;
     let stopped = false;
-    let timer: NodeJS.Timeout;
+    let timer: ReturnType<typeof setTimeout>;
     const tick = () => {
       if (stopped) return;
       const rssi = rssiRef.current;
-      let next = 320; // quiet idle re-check when no signal / muted
+      let next = 320; // quiet idle re-check when muted / no signal (silent)
       if (geigerOnRef.current && rssi != null) {
-        const r = clamp(rssi, -90, -35);
-        // -90 dBm → 1300ms (slow blip) … -35 dBm → 110ms (fast chatter)
-        next = Math.round(1300 + ((r + 90) / 55) * (110 - 1300));
-        try { process.stdout.write("\x07"); } catch { /* non-TTY: no-op */ }
+        next = geigerIntervalMs(rssi);
+        emitBell();
       }
       timer = setTimeout(tick, next);
     };
@@ -318,18 +335,19 @@ export function Screen() {
   }, [view, locateActive]);
 
   // Peak ping: a sharper double-tick the instant a NEW peak is reached ("hottest
-  // point yet" — i.e. you just got closer than ever). Seeds silently on first read.
+  // point yet" — you just got closer than ever). Seeds silently on first read; the
+  // 45ms second bell is cancelled on unmount so it never beeps off-screen.
   useEffect(() => {
     const p = locate?.peak_dbm;
     if (p == null) return;
-    if (peakRef.current != null && p > peakRef.current && geigerOnRef.current && locateActive) {
-      try {
-        process.stdout.write("\x07");
-        setTimeout(() => { try { process.stdout.write("\x07"); } catch { /* */ } }, 45);
-      } catch { /* non-TTY: no-op */ }
-    }
+    const prev = peakRef.current;
     peakRef.current = p;
-  }, [locate?.peak_dbm, locateActive, geigerOnRef]);
+    if (prev == null || p <= prev || !geigerOnRef.current || !locateActive) return;
+    emitBell();
+    let cancelled = false;
+    const t = setTimeout(() => { if (!cancelled) emitBell(); }, 45);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [locate?.peak_dbm, locateActive]);
 
   // ----- live refs for the input handler (avoid closure staleness) -----------
   const viewRef = useLive(view);
@@ -831,7 +849,7 @@ function LocateMeter({ s, cols, geigerOn }: { s: LocateSample | null; cols: numb
       </Box>
       {/* rate + samples + geiger state (small) */}
       <Box>
-        <Text color={geigerOn ? COLORS.mint : TEXT.dim}>{geigerOn ? "♪ geiger" : "🔇 muted"}</Text>
+        <Text color={geigerOn ? COLORS.mint : TEXT.dim}>{geigerOn ? "♪ geiger" : "✕ muted"}</Text>
         <Text color={TEXT.dim}> (b) · </Text>
         <Text color={TEXT.dim}>
           {s?.rate_hz ?? 0} Hz · {s?.samples ?? 0} samples

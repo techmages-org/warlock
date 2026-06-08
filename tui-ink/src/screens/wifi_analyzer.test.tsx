@@ -9,7 +9,7 @@ import { describe, expect, it, vi } from "vitest";
 import { WarlockProvider, type WarlockContextValue } from "../context.js";
 import type { ApiClient } from "../lib/api.js";
 import type { EventBus } from "../lib/ws.js";
-import { Screen as WifiAnalyzer } from "./wifi_analyzer.js";
+import { Screen as WifiAnalyzer, geigerIntervalMs } from "./wifi_analyzer.js";
 
 const CHANNELS = {
   ok: true,
@@ -262,5 +262,39 @@ describe("WifiAnalyzer screen", () => {
     while (lines.length && lines[lines.length - 1].trim() === "") lines.pop();
     expect(lines.length).toBeLessThanOrEqual(20);
     unmount();
+  });
+
+  it("shows the geiger indicator (ON by default) and toggles mute with b", async () => {
+    const { lastFrame, stdin, unmount } = render(
+      <WarlockProvider value={mockContext({ locateActiveFromStart: true })}>
+        <WifiAnalyzer />
+      </WarlockProvider>,
+    );
+    await vi.waitFor(() => expect(lastFrame()).toContain("2.4 GHz"));
+    stdin.write("3"); // → Locate; re-entry probe resumes the live meter
+    await vi.waitFor(() => expect(lastFrame()).toContain("HOMING"));
+    // Geiger is ON by default — indicator shown, not muted.
+    await vi.waitFor(() => expect(lastFrame()).toContain("♪ geiger"));
+    expect(lastFrame()).not.toContain("muted");
+    stdin.write("b"); // mute
+    await vi.waitFor(() => expect(lastFrame()).toContain("✕ muted"));
+    stdin.write("b"); // unmute
+    await vi.waitFor(() => expect(lastFrame()).toContain("♪ geiger"));
+    unmount();
+  });
+});
+
+describe("geigerIntervalMs (homing cadence)", () => {
+  it("maps signal strength to tick interval — stronger = faster", () => {
+    expect(geigerIntervalMs(-90)).toBe(1300); // weak → slow blips
+    expect(geigerIntervalMs(-35)).toBe(110); // strong → fast chatter
+    // clamps beyond the window
+    expect(geigerIntervalMs(-120)).toBe(1300);
+    expect(geigerIntervalMs(-10)).toBe(110);
+    // mid-range lands strictly between the bounds
+    expect(geigerIntervalMs(-62)).toBeGreaterThan(110);
+    expect(geigerIntervalMs(-62)).toBeLessThan(1300);
+    // monotonic: a stronger signal always ticks at least as fast
+    expect(geigerIntervalMs(-50)).toBeLessThan(geigerIntervalMs(-70));
   });
 });
