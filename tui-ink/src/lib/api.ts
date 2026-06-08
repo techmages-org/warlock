@@ -34,9 +34,20 @@ export function createApiClient(config: Config): ApiClient {
     const headers = new Headers(init.headers);
     if (authHeader) headers.set("Authorization", authHeader);
     const r = await fetch(joinUrl(config.apiUrl, path), { ...init, headers });
-    if (!r.ok) throw new Error(`${r.status} ${r.statusText} — ${path}`);
-    // Some endpoints (e.g. 204) return no body.
+    // Some endpoints (e.g. 204) return no body; read it once for both paths.
     const text = await r.text();
+    if (!r.ok) {
+      // Surface FastAPI's `detail` (e.g. "Can't start Locate — WiFi Recon is
+      // running…") instead of a bare "409 Conflict".
+      let detail = "";
+      try {
+        const b = JSON.parse(text);
+        if (b && typeof b.detail === "string") detail = b.detail;
+      } catch {
+        /* non-JSON body */
+      }
+      throw new Error(detail ? `${r.status}: ${detail}` : `${r.status} ${r.statusText} — ${path}`);
+    }
     return (text ? JSON.parse(text) : undefined) as T;
   }
 
