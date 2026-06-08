@@ -284,10 +284,14 @@ async def _locate_reader(proc: asyncio.subprocess.Process) -> None:
 async def _locate_start(bssid: str, channel: int | None, iface: str | None) -> dict[str, Any]:
     global _locate_proc, _locate_task
     if _LOCATE.get("active"):
-        raise HTTPException(409, "locate already running — stop it first")
+        raise HTTPException(409, "Locate is already running. Stop the current Locate first.")
     from warlock.modules import wifi_recon  # the dongle is shared with the recon sweep
     if wifi_recon._is_running():
-        raise HTTPException(409, "stop the WiFi Recon sweep first — it owns the radio")
+        raise HTTPException(
+            409,
+            "Can't start Locate — the WiFi Recon sweep is running and owns the radio. "
+            "Stop WiFi Recon first (its Control tab → Stop), then start Locate.",
+        )
     bssid = bssid.lower().strip()
     if not re.fullmatch(r"[0-9a-f:]{17}", bssid):
         raise HTTPException(400, "bssid must be a MAC (aa:bb:cc:dd:ee:ff)")

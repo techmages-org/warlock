@@ -15,6 +15,7 @@ export const NAV_KEYS: Record<string, string> = {
   agent: "b", // pinned AI assistant ("bot"); frontend-only, not a backend module
   wireless: "f", // pinned guided flow (W0-assigned; not in Textual)
   wifi_recon: "w",
+  wifi_analyzer: "z", // analyZer — Channels/Survey/Locate (g z)
   wifi_offensive: "o",
   crack: "c",
   wireless_ids: "i",

@@ -1,9 +1,23 @@
 // Minimal API client. All endpoints are same-origin when served from FastAPI,
 // or proxied through Vite in dev.
 
+// Build an error that surfaces FastAPI's `detail` (e.g. "409: Can't start Locate —
+// the WiFi Recon sweep is running…") so the UI shows the reason + the fix, not a
+// bare "409 Conflict". Falls back to status + path for non-JSON / detail-less bodies.
+async function httpError(r: Response, path: string): Promise<Error> {
+  let detail = "";
+  try {
+    const b = await r.json();
+    if (b && typeof b.detail === "string") detail = b.detail;
+  } catch {
+    /* non-JSON body */
+  }
+  return new Error(detail ? `${r.status}: ${detail}` : `${r.status} ${r.statusText} — ${path}`);
+}
+
 export async function apiGet<T = unknown>(path: string): Promise<T> {
   const r = await fetch(path, { credentials: "include" });
-  if (!r.ok) throw new Error(`${r.status} ${r.statusText} — ${path}`);
+  if (!r.ok) throw await httpError(r, path);
   return (await r.json()) as T;
 }
 
@@ -14,7 +28,7 @@ export async function apiPost<T = unknown>(path: string, body?: unknown): Promis
     body: body ? JSON.stringify(body) : undefined,
     credentials: "include",
   });
-  if (!r.ok) throw new Error(`${r.status} ${r.statusText} — ${path}`);
+  if (!r.ok) throw await httpError(r, path);
   return (await r.json()) as T;
 }
 
