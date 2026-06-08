@@ -301,7 +301,23 @@ Built on the [ClockworkPi uConsole](https://www.clockworkpi.com/uconsole) and th
 [Raspberry Pi](https://www.raspberrypi.com) Compute Module 5. An open project of
 **[Titanium Computing](https://techmages.org)**.
 
-<!-- LOGO_STRIP -->
+<br>
+
+<div align="center">
+
+###### Built with · Powered by
+
+<table border="0"><tr align="center" valign="middle">
+<td><a href="https://www.clockworkpi.com/uconsole"><img src="docs/img/logos/clockworkpi.png" alt="ClockworkPi uConsole" height="30" /></a></td>
+<td width="44"></td>
+<td><a href="https://hackergadgets.com"><img src="docs/img/logos/hackergadgets.svg" alt="Hacker Gadgets" height="46" /></a></td>
+<td width="44"></td>
+<td><a href="https://www.raspberrypi.com"><img src="docs/img/logos/raspberrypi.png" alt="Raspberry Pi" height="46" /></a></td>
+<td width="44"></td>
+<td><a href="https://techmages.org"><img src="docs/img/logos/titanium-computing.png" alt="Titanium Computing" height="28" /></a></td>
+</tr></table>
+
+</div>
 
 ## 📜 License
 
