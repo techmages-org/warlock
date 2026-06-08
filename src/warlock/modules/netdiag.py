@@ -315,6 +315,66 @@ def _flap_counters(iface: str) -> dict[str, Any]:
             "carrier_up_count": num("carrier_up_count"), "carrier_down_count": num("carrier_down_count")}
 
 
+# ----- A9: service & WAN health (rogue-DHCP, NTP/GPS, captive-portal) ---------
+
+async def _dhcp_scan(iface: str) -> dict[str, Any]:
+    rc, out, _ = await _run([_tool("nmap"), "--script", "broadcast-dhcp-discover", "-e", iface],
+                            sudo=True, timeout=45)
+    servers: list[dict[str, Any]] = []
+    cur: dict[str, Any] = {}
+    for line in out.splitlines():
+        s = line.strip().lstrip("|_").strip()
+        if s.startswith("IP Offered:"):
+            cur = {"offered": s.split(":", 1)[1].strip()}
+        elif s.startswith("Router:"):
+            cur["router"] = s.split(":", 1)[1].strip()
+        elif s.startswith("Domain Name Server:"):
+            cur["dns"] = s.split(":", 1)[1].strip()
+        elif s.startswith("Server Identifier:"):
+            cur["server"] = s.split(":", 1)[1].strip()
+            servers.append(cur)
+            cur = {}
+    uniq = sorted({sv["server"] for sv in servers if sv.get("server")})
+    rogue = len(uniq) > 1
+    return {"available": rc == 0, "servers": servers, "server_count": len(uniq), "rogue_dhcp": rogue,
+            "verdict": "FAIL" if rogue else ("PASS" if uniq else "WARN"),
+            "note": (f"MULTIPLE DHCP servers {uniq} — ROGUE DHCP on the segment" if rogue
+                     else (f"single DHCP server {uniq[0]}" if uniq else "no DHCP offer seen"))}
+
+
+async def _ntp_check() -> dict[str, Any]:
+    rc, out, _ = await _run([_tool("chronyc"), "tracking"], timeout=6)
+    if rc != 0:
+        return {"available": False, "note": "chronyc unavailable"}
+
+    def g(p: str) -> str | None:
+        m = re.search(p, out)
+        return m.group(1).strip() if m else None
+
+    strat = g(r"Stratum\s*:\s*(\d+)")
+    last = g(r"Last offset\s*:\s*([-\d.]+)")
+    synced = strat is not None and int(strat) < 16
+    off = abs(float(last)) if last else None
+    return {"available": True, "reference": g(r"Reference ID\s*:\s*(.+)"),
+            "stratum": int(strat) if strat else None, "last_offset_s": float(last) if last else None,
+            "verdict": "PASS" if (synced and (off is None or off < 0.1)) else ("WARN" if synced else "FAIL"),
+            "note": (f"synced, stratum {strat}, offset {last}s" if synced else "NOT synced to a time source")}
+
+
+async def _wan_check() -> dict[str, Any]:
+    url = "http://connectivitycheck.gstatic.com/generate_204"
+    rc, out, _ = await _run([_tool("curl"), "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                             "--max-time", "6", url], timeout=10)
+    code = out.strip()
+    return {"available": _tool("curl") is not None, "http_code": code,
+            "internet": code in ("204", "200"),
+            "captive_portal_suspected": bool(code) and code != "204",
+            "verdict": "PASS" if code == "204" else ("WARN" if code else "FAIL"),
+            "note": ("internet OK, no captive portal" if code == "204"
+                     else (f"unexpected HTTP {code} — possible captive portal / proxy" if code
+                           else "no WAN response — internet down?"))}
+
+
 # ----- verdict roll-up (LinkRunner-style PASS/WARN/FAIL) ----------------------
 
 def _rollup(link: dict, svc: dict, path: dict) -> dict[str, Any]:
@@ -514,5 +574,24 @@ class Module(ModuleBase):
                 verdict = "WARN"
                 note = f"{ch} carrier transitions since boot ({before.get('carrier_down_count')} down) — investigate if unexpected"
             return {"ok": True, "iface": iface, "verdict": verdict, "flap": before, "window": window, "note": note}
+
+        @r.post("/dhcp_scan")
+        async def dhcp_scan_ep(req: IfaceReq) -> dict[str, Any]:
+            """Active DHCP discovery + ROGUE-DHCP detection (multiple servers on the segment)."""
+            iface = await _iface_or_default(req.iface)
+            res = await _dhcp_scan(iface)
+            _audit("netdiag.dhcp_scan", f"broadcast-dhcp-discover {iface}", iface,
+                   res.get("note", ""), "success" if res.get("available") else "error")
+            return {"ok": True, "iface": iface, **res}
+
+        @r.post("/ntp")
+        async def ntp_ep() -> dict[str, Any]:
+            """Time-sync health (chrony) — offset/stratum; the deck's GPS makes it a reference clock."""
+            return {"ok": True, **(await _ntp_check())}
+
+        @r.post("/wan")
+        async def wan_ep() -> dict[str, Any]:
+            """Internet reachability + captive-portal detection (generate_204)."""
+            return {"ok": True, **(await _wan_check())}
 
         return r
