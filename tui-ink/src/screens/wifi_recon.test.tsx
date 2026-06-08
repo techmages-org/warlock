@@ -79,7 +79,7 @@ describe("WifiRecon screen", () => {
         <WifiRecon />
       </WarlockProvider>,
     );
-    await vi.waitFor(() => expect(lastFrame()).toContain("ACCESS POINTS (30)"));
+    await vi.waitFor(() => expect(lastFrame()).toContain("ACCESS POINTS (30 ")); // "(30 · N geo)"
     const frame = lastFrame()!;
     expect(frame).toMatch(/\+\d+ more/);
     expect(frame).toContain("/30)");

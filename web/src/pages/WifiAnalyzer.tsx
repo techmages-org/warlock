@@ -130,6 +130,18 @@ const ZONE_TEXT: Record<ZoneColor, string> = {
   dim: "text-txt-dim",
 };
 
+// Solid heat-cell colors for the SURVEY heatmap (hex so they sit on inline
+// styles): hot=bright green, warm=amber, cold=cyan, dead=dark red.
+const ZONE_HEAT: Record<string, { bg: string; fg: string }> = {
+  hot: { bg: "#14ff8f", fg: "#04140b" },
+  warm: { bg: "#ffb347", fg: "#1a0f00" },
+  cold: { bg: "#00e5ff", fg: "#001417" },
+  dead: { bg: "#3a0712", fg: "#ff6b97" },
+};
+function heatStyle(zone: string): { bg: string; fg: string } {
+  return ZONE_HEAT[zone] ?? { bg: "#0c1426", fg: "#4a5878" };
+}
+
 const BAND_ORDER = ["2.4", "5", "6"];
 function bandLabel(b: string): string {
   return b === "2.4" ? "2.4 GHz" : b === "5" ? "5 GHz" : b === "6" ? "6 GHz" : `${b} GHz`;
@@ -526,6 +538,13 @@ export function WifiAnalyzer() {
     setAudioOn((v) => !v);
   }, []);
 
+  // Mode change is also a gesture → arm, so picking Sonar before the 🔊 toggle
+  // (already-active edge) still produces sound. setMode effect applies the mode.
+  const changeMode = useCallback((m: LocateMode) => {
+    audioRef.current?.arm();
+    setMode(m);
+  }, []);
+
   const iface = status?.iface ?? channels?.iface ?? null;
   const stateLabel = locating ? "HOMING" : status == null ? "ACQUIRING" : "PASSIVE";
 
@@ -584,7 +603,7 @@ export function WifiAnalyzer() {
           audioOn={audioOn}
           onToggleAudio={toggleAudio}
           mode={mode}
-          onMode={setMode}
+          onMode={changeMode}
           onScan={scanForTargets}
           onStart={startLocate}
           onStop={stopLocate}
@@ -798,6 +817,78 @@ function SurveyTab({
         <Tile title="MAX dBm"><BigValue value={sum?.max_dbm ?? DASH} color="mint" size="md" /></Tile>
       </div>
 
+      {/* COVERAGE HEAT FIELD — the standout: every waypoint as a heat cell, in
+          walk order, colored by zone. Dead zones (coverage gaps) shout. */}
+      <Tile
+        title="COVERAGE HEATMAP"
+        led={(sum?.dead_zones ?? 0) > 0 ? "pink" : samples.length > 0 ? "mint" : "amber"}
+        headerRight={
+          <span className="hud-label">
+            <span className="text-txt-dim">DEAD ZONES </span>
+            <span
+              className={(sum?.dead_zones ?? 0) > 0 ? "text-pink-alert tabular-nums" : "text-mint-safe tabular-nums"}
+              style={(sum?.dead_zones ?? 0) > 0 ? { textShadow: "var(--glow-pink)" } : undefined}
+            >
+              {sum?.dead_zones ?? 0}
+            </span>
+          </span>
+        }
+      >
+        {samples.length === 0 ? (
+          <div className="text-txt-dim text-[0.8125rem]">
+            no samples yet — record waypoints as you walk; each becomes a heat cell here.
+          </div>
+        ) : (
+          <>
+            <div className="flex max-h-80 flex-wrap gap-2 overflow-auto">
+              {samples.map((s, i) => {
+                const hs = heatStyle(s.zone);
+                const dead = s.zone === "dead";
+                return (
+                  <div
+                    key={`${s.ts}-${i}`}
+                    className="flex flex-col items-center justify-center rounded-sm px-1 py-1 text-center"
+                    style={{
+                      background: hs.bg,
+                      color: hs.fg,
+                      width: 82,
+                      height: 58,
+                      boxShadow: dead ? "inset 0 0 0 1px rgba(255,41,117,0.5)" : `0 0 8px ${hs.bg}55`,
+                    }}
+                    title={`${s.label ?? `#${i + 1}`} · ${s.rssi_dbm != null ? `${s.rssi_dbm} dBm` : "no signal"} · ${s.zone}${s.target ? ` · ${s.target}` : ""}`}
+                  >
+                    <div className="w-full truncate text-[0.68rem] font-semibold leading-tight">
+                      {s.label || `#${i + 1}`}
+                    </div>
+                    <div className="text-[1rem] font-bold leading-tight tabular-nums">
+                      {s.rssi_dbm != null ? s.rssi_dbm : "∅"}
+                    </div>
+                    <div className="text-[0.58rem] uppercase tracking-wide opacity-80">{s.zone}</div>
+                  </div>
+                );
+              })}
+            </div>
+            {/* legend */}
+            <div className="mt-3 flex flex-wrap items-center gap-3 text-[0.68rem]">
+              {(["hot", "warm", "cold", "dead"] as const).map((z) => {
+                const hs = heatStyle(z);
+                return (
+                  <span key={z} className="inline-flex items-center gap-1">
+                    <span
+                      className="inline-block h-3 w-3 rounded-sm"
+                      style={{ background: hs.bg, boxShadow: z === "dead" ? "inset 0 0 0 1px rgba(255,41,117,0.5)" : undefined }}
+                    />
+                    <span className="text-txt-dim uppercase tracking-wide">
+                      {z} ({zones[z] ?? 0})
+                    </span>
+                  </span>
+                );
+              })}
+            </div>
+          </>
+        )}
+      </Tile>
+
       <Tile title="WAYPOINT TRACE" padded={false} led={samples.length > 0 ? "cyan" : "amber"}>
         <div className="max-h-96 overflow-auto">
           <table className="w-full text-[0.8125rem]">
@@ -856,6 +947,8 @@ function LocateTab({
   locBusy,
   audioOn,
   onToggleAudio,
+  mode,
+  onMode,
   onScan,
   onStart,
   onStop,
@@ -867,6 +960,8 @@ function LocateTab({
   locBusy: string | null;
   audioOn: boolean;
   onToggleAudio: () => void;
+  mode: LocateMode;
+  onMode: (m: LocateMode) => void;
   onScan: () => void;
   onStart: (ap: ScanAP) => void;
   onStop: () => void;
@@ -878,6 +973,8 @@ function LocateTab({
         locBusy={locBusy}
         audioOn={audioOn}
         onToggleAudio={onToggleAudio}
+        mode={mode}
+        onMode={onMode}
         onStop={onStop}
       />
     );
@@ -984,12 +1081,16 @@ function HomingMeter({
   locBusy,
   audioOn,
   onToggleAudio,
+  mode,
+  onMode,
   onStop,
 }: {
   locate: LocateSample | null;
   locBusy: string | null;
   audioOn: boolean;
   onToggleAudio: () => void;
+  mode: LocateMode;
+  onMode: (m: LocateMode) => void;
   onStop: () => void;
 }) {
   const rssi = locate?.rssi_dbm ?? null;
@@ -1002,27 +1103,54 @@ function HomingMeter({
   const range = locate?.est_range_ft ?? null;
   const proximity = locate?.proximity ?? "no-signal";
 
+  const isWave = mode === "wave";
+  const audioLabel = isWave ? "∿ visual" : audioOn ? "🔊 Sound" : "🔇 Muted";
+
   return (
     <div className="space-y-4">
+      {/* Mode selector — the pluggable search instrument seam. */}
+      <div className="hud-tile flex flex-wrap items-center gap-2 px-3 py-2">
+        <span className="hud-label text-txt-dim">SEARCH MODE</span>
+        <div className="flex flex-wrap gap-1">
+          {LOCATE_MODES.map((m) => (
+            <button
+              key={m.id}
+              className="hud-btn px-2 py-0.5 text-[0.75rem]"
+              data-active={mode === m.id ? "true" : undefined}
+              onClick={() => onMode(m.id)}
+              title={m.hint}
+            >
+              {m.label}
+            </button>
+          ))}
+        </div>
+        <span className="ml-auto text-txt-dim text-[0.7rem]">
+          {LOCATE_MODES.find((m) => m.id === mode)?.hint}
+        </span>
+      </div>
+
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
-        {/* Primary readout — big dBm + signal bar + geiger audio toggle */}
+        {/* Primary readout — big dBm + signal bar + audio toggle */}
         <Tile
           title="SIGNAL"
           led={rssi != null ? "cyan" : "amber"}
           className="lg:col-span-1"
           headerRight={
             <button
-              className="hud-btn px-2 py-0.5 text-[0.72rem]"
-              data-active={audioOn ? "true" : undefined}
+              className="hud-btn px-2 py-0.5 text-[0.72rem] disabled:opacity-40"
+              data-active={!isWave && audioOn ? "true" : undefined}
               onClick={onToggleAudio}
+              disabled={isWave}
               title={
-                audioOn
-                  ? "Geiger audio ON — ticks speed up as you get closer; click to mute"
-                  : "muted — click to enable Geiger homing ticks"
+                isWave
+                  ? "Wave mode is visual — no audio"
+                  : audioOn
+                    ? "audio ON — click to mute"
+                    : "muted — click to enable homing audio"
               }
-              aria-pressed={audioOn}
+              aria-pressed={!isWave && audioOn}
             >
-              {audioOn ? "🔊 Geiger" : "🔇 Muted"}
+              {audioLabel}
             </button>
           }
         >
@@ -1065,6 +1193,17 @@ function HomingMeter({
         </Tile>
       </div>
 
+      {isWave && (
+        <Tile title="OSCILLOSCOPE" led={rssi != null ? "cyan" : "dim"}>
+          <WaveScope rssi={rssi} trend={trend} />
+          <div className="mt-2 text-txt-dim text-[0.7rem]">
+            live waveform — amplitude &amp; speed track signal strength; color tracks trend
+            (<span className="text-mint-safe">warmer</span> / <span className="text-pink-alert">colder</span> /{" "}
+            <span className="text-amber-base">steady</span>). Pair with Geiger/Sonar audio.
+          </div>
+        </Tile>
+      )}
+
       <Tile title="TARGET" led="cyan">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="grid grid-cols-1 gap-1 text-[0.85rem] md:grid-cols-3 md:gap-x-6">
@@ -1090,6 +1229,84 @@ function Field({ k, v }: { k: string; v: ReactNode }) {
     <div className="flex items-baseline justify-between gap-3 py-0.5">
       <span className="hud-label text-txt-dim">{k}</span>
       <span className="text-right break-all text-txt-body tabular-nums">{v}</span>
+    </div>
+  );
+}
+
+// Trend → phosphor hex (canvas can't read CSS vars; mirror index.css values).
+const TREND_HEX: Record<Trend, string> = {
+  warmer: "#14ff8f", // --mint-safe
+  colder: "#ff2975", // --pink-alert
+  steady: "#ffb347", // --amber-base
+  "no-signal": "#4a5878", // --txt-dim
+};
+
+// 'wave' mode — a live <canvas> oscilloscope. Amplitude + sweep speed track the
+// signal strength (rssi[-90,-35]); stroke color tracks the trend. Reads the
+// latest sample through refs so the rAF loop never re-subscribes; the loop is
+// cancelled on unmount (i.e. when the user switches away from wave mode).
+function WaveScope({ rssi, trend }: { rssi: number | null; trend: Trend }) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const rssiRef = useRef<number | null>(rssi);
+  const colorRef = useRef<string>(TREND_HEX[trend] ?? "#00e5ff");
+  rssiRef.current = rssi;
+  colorRef.current = TREND_HEX[trend] ?? "#00e5ff";
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const g = canvas.getContext("2d");
+    if (!g) return;
+    let raf = 0;
+    let phase = 0;
+    const draw = () => {
+      const w = canvas.width;
+      const h = canvas.height;
+      g.clearRect(0, 0, w, h);
+      // baseline grid
+      g.strokeStyle = "rgba(26,36,57,0.9)"; // --line-dim
+      g.lineWidth = 1;
+      g.beginPath();
+      g.moveTo(0, h / 2);
+      g.lineTo(w, h / 2);
+      g.stroke();
+
+      const r = rssiRef.current;
+      const strength = r == null ? 0 : Math.max(0, Math.min(1, (r + 90) / 55));
+      phase += 0.12 + strength * 0.55; // faster sweep when stronger
+      const amp = (h / 2 - 6) * (0.08 + strength * 0.92);
+      const freq = 3 + strength * 22;
+      const color = colorRef.current;
+
+      g.strokeStyle = color;
+      g.lineWidth = 2;
+      g.shadowColor = color;
+      g.shadowBlur = r == null ? 0 : 8 * strength;
+      g.beginPath();
+      for (let x = 0; x <= w; x++) {
+        const t = x / w;
+        const y = h / 2 + Math.sin(t * freq * Math.PI * 2 + phase) * amp * (r == null ? 0 : 1);
+        if (x === 0) g.moveTo(x, y);
+        else g.lineTo(x, y);
+      }
+      g.stroke();
+      g.shadowBlur = 0;
+
+      raf = requestAnimationFrame(draw);
+    };
+    raf = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
+  return (
+    <div className="w-full overflow-hidden border border-line-dim bg-bg-strip">
+      <canvas
+        ref={canvasRef}
+        width={640}
+        height={150}
+        className="block w-full"
+        style={{ height: 150 }}
+      />
     </div>
   );
 }
