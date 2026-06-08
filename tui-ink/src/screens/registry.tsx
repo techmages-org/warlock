@@ -12,6 +12,7 @@ import { Screen as Dashboard } from "./dashboard.js";
 import { Screen as Agent } from "./agent.js";
 import { Screen as Wireless } from "./wireless.js";
 import { Screen as WifiRecon } from "./wifi_recon.js";
+import { Screen as WifiAnalyzer } from "./wifi_analyzer.js";
 import { Screen as WifiOffensive } from "./wifi_offensive.js";
 import { Screen as Crack } from "./crack.js";
 import { Screen as WirelessIds } from "./wireless_ids.js";
@@ -35,6 +36,7 @@ export const SCREENS: Record<string, ScreenComponent> = {
   agent: Agent,
   wireless: Wireless,
   wifi_recon: WifiRecon,
+  wifi_analyzer: WifiAnalyzer,
   wifi_offensive: WifiOffensive,
   crack: Crack,
   wireless_ids: WirelessIds,

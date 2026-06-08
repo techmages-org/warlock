@@ -15,6 +15,11 @@ type AP = {
   first_seen: string;
   last_seen: string;
   wps: boolean;
+  // wardriving geo (additive — null until a BSSID is GPS-stamped at first sight)
+  lat?: number | null;
+  lon?: number | null;
+  alt?: number | null;
+  geo_fixed?: boolean;
 };
 
 type Client = {
@@ -65,6 +70,8 @@ export function WifiRecon() {
   const [hands, setHands] = useState<Handshake[]>([]);
   const [note, setNote] = useState<string>("");
   const [channels, setChannels] = useState<string>("all");
+  const [withCoords, setWithCoords] = useState<number>(0);
+  const [busy, setBusy] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -83,8 +90,11 @@ export function WifiRecon() {
     let alive = true;
     const load = async () => {
       try {
-        const d = await apiGet<{ aps: AP[] }>("/api/wifi_recon/aps");
-        if (alive) setAps(d.aps || []);
+        const d = await apiGet<{ aps: AP[]; with_coords?: number }>("/api/wifi_recon/aps");
+        if (alive) {
+          setAps(d.aps || []);
+          setWithCoords(d.with_coords ?? 0);
+        }
       } catch { /**/ }
     };
     load();
@@ -168,7 +178,37 @@ export function WifiRecon() {
         </Tile>
       </div>
 
-      {tab === "aps" && <APsTab aps={aps} />}
+      {tab === "aps" && (
+        <APsTab
+          aps={aps}
+          withCoords={withCoords}
+          busy={busy}
+          onClear={async () => {
+            setBusy("clear");
+            try {
+              const d = await apiPost<{ cleared_stamps?: number; note?: string }>("/api/wifi_recon/clear");
+              setNote(
+                d.note
+                  ? `clear: ${d.note}`
+                  : `cleared AP list — dropped ${d.cleared_stamps ?? 0} geo-stamp(s); still-present APs re-appear as re-seen`,
+              );
+              setAps([]);
+              setWithCoords(0);
+            } catch (e) { setNote(`clear failed: ${e}`); }
+            finally { setBusy(null); }
+          }}
+          onExport={async () => {
+            setBusy("export");
+            try {
+              const d = await apiPost<{ count: number; with_coords: number; csv: string; kml: string }>(
+                "/api/wifi_recon/export",
+              );
+              setNote(`exported ${d.count} APs · ${d.with_coords} geo → ${d.csv} · ${d.kml}`);
+            } catch (e) { setNote(`export failed: ${e}`); }
+            finally { setBusy(null); }
+          }}
+        />
+      )}
       {tab === "clients" && <ClientsTab clients={clients} />}
       {tab === "handshakes" && <HandshakesTab rows={hands} />}
       {tab === "control" && (
@@ -204,9 +244,50 @@ function encColor(enc: string): "mint" | "amber" | "pink" | "violet" {
   return "amber";
 }
 
-function APsTab({ aps }: { aps: AP[] }) {
+function APsTab({
+  aps,
+  withCoords,
+  busy,
+  onClear,
+  onExport,
+}: {
+  aps: AP[];
+  withCoords: number;
+  busy: string | null;
+  onClear: () => void;
+  onExport: () => void;
+}) {
   return (
-    <Tile title="ACCESS POINTS" padded={false} led={aps.length > 0 ? "mint" : "amber"}>
+    <Tile
+      title="ACCESS POINTS"
+      padded={false}
+      led={aps.length > 0 ? "mint" : "amber"}
+      headerRight={
+        <div className="flex items-center gap-2">
+          <span className="hud-label text-txt-dim">
+            <span className="text-amber-base tabular-nums">{aps.length}</span> APs
+            <span className="mx-1">·</span>
+            <span className="text-mint-safe tabular-nums">{withCoords}</span> geo
+          </span>
+          <button
+            className="hud-btn px-2 py-0.5 text-[0.72rem] border-cyan-signal text-cyan-signal disabled:opacity-40"
+            onClick={onExport}
+            disabled={busy === "export" || aps.length === 0}
+            title="write CSV + KML (GPS-located APs) to ~/warlock/captures/wifi/exports/"
+          >
+            {busy === "export" ? "⟳ exporting…" : "⤓ Export"}
+          </button>
+          <button
+            className="hud-btn px-2 py-0.5 text-[0.72rem] border-pink-alert text-pink-alert disabled:opacity-40"
+            onClick={onClear}
+            disabled={busy === "clear" || aps.length === 0}
+            title="reset the AP list (sets a clear baseline + drops geo-stamps; scan keeps running)"
+          >
+            {busy === "clear" ? "⟳ clearing…" : "✕ Clear list"}
+          </button>
+        </div>
+      }
+    >
       <div className="overflow-auto">
         <table className="w-full text-[0.8125rem]">
           <thead>
@@ -216,12 +297,13 @@ function APsTab({ aps }: { aps: AP[] }) {
               <th className="hud-label px-3 py-2 text-left">CH</th>
               <th className="hud-label px-3 py-2 text-left">ENC</th>
               <th className="hud-label px-3 py-2 text-left">SIG</th>
+              <th className="hud-label px-3 py-2 text-left">GPS</th>
               <th className="hud-label px-3 py-2 text-left">Beacons</th>
             </tr>
           </thead>
           <tbody>
             {aps.length === 0 && (
-              <tr><td colSpan={6} className="px-3 py-4 text-txt-dim">no APs yet — start a scan</td></tr>
+              <tr><td colSpan={7} className="px-3 py-4 text-txt-dim">no APs yet — start a scan</td></tr>
             )}
             {aps.slice(0, 200).map((a) => (
               <tr
@@ -240,6 +322,18 @@ function APsTab({ aps }: { aps: AP[] }) {
                     <SignalBars value={a.signal} min={-95} max={-30} color="cyan" />
                     <span className="text-cyan-signal tabular-nums">{a.signal}</span>
                   </span>
+                </td>
+                <td className="px-3 py-1 tabular-nums">
+                  {a.lat != null && a.lon != null ? (
+                    <span
+                      className={a.geo_fixed ? "text-mint-safe" : "text-txt-body"}
+                      title={a.geo_fixed ? "GPS fix at first sighting" : "stamped without a live fix"}
+                    >
+                      {a.lat.toFixed(4)},{a.lon.toFixed(4)}
+                    </span>
+                  ) : (
+                    <span className="text-txt-dim">—</span>
+                  )}
                 </td>
                 <td className="px-3 py-1 tabular-nums text-txt-dim">{a.beacons}</td>
               </tr>

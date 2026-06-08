@@ -16,6 +16,7 @@ import { Sdr } from "./pages/Sdr";
 import { SdrOffensive } from "./pages/SdrOffensive";
 import { Stub } from "./pages/Stub";
 import { System } from "./pages/System";
+import { WifiAnalyzer } from "./pages/WifiAnalyzer";
 import { WifiRecon } from "./pages/WifiRecon";
 import { Wireless } from "./pages/Wireless";
 
@@ -100,6 +101,8 @@ export default function App() {
           <Route path="/ops" element={<Ops />} />
           <Route path="/wifi_recon" element={<WifiRecon />} />
           <Route path="/wifi-recon" element={<WifiRecon />} />
+          <Route path="/wifi_analyzer" element={<WifiAnalyzer />} />
+          <Route path="/wifi-analyzer" element={<WifiAnalyzer />} />
           <Route path="/wireless" element={<Wireless />} />
           <Route path="/crack" element={<Crack />} />
           <Route path="/sdr" element={<Sdr />} />
