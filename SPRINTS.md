@@ -45,6 +45,13 @@ The deck is field utility gear first, security tool second. These slot beside `n
 > Build sequencing TBD with the operator; A7 (capture) underpins A8 (VoIP). All blue-team/local by
 > default; capture/scan beyond the local segment stays engagement-gated.
 
+### Module build-out (existing modules to flesh out)
+- **esp32_companion build-out** *(noted 2026-06-07)*: the **ESP32-Marauder is physically in the deck
+  right now**, but the module is a thin **42-line serial bridge** — the gap is software, not hardware.
+  Build out the full Marauder integration over the serial link: Wi-Fi AP/station scan, deauth/PMKID,
+  BLE scan/spam, packet monitor + handoff to `capture`/`wireless_ids`. Red-team capability →
+  engagement-gated. (The only genuinely under-built module per the A0 audit.)
+
 ---
 
 ## Track B — Control plane (AAR): identity → log → grants → ingest → producer *(NEXT)*
