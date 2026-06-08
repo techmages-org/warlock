@@ -22,6 +22,7 @@ TAB_ORDER: list[str] = [
     "netdiag",
     "capture",
     "voip",
+    "nettools",
     "sdr_offensive",
     "esp32_companion",
     "wireless_ids",
