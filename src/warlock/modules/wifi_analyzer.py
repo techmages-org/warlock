@@ -14,15 +14,18 @@ when `iw` is missing. Pairs with `wireless_ids` (rogue/anomaly) and feeds the A6
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
 import shutil
+import time
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from warlock.config import get_settings
 from warlock.modules._base import ModuleBase
 
 log = logging.getLogger("warlock.wifi_analyzer")
@@ -202,8 +205,33 @@ async def _wifi_iface(req_iface: str | None) -> str:
     return up[0] if up else ifaces[0]
 
 
+def _zone(dbm: float | None) -> str:
+    """Walk-test coverage classification."""
+    if dbm is None:
+        return "dead"
+    if dbm >= -60:
+        return "hot"
+    if dbm >= -70:
+        return "warm"
+    if dbm >= -80:
+        return "cold"
+    return "dead"
+
+
+def _walk_file():
+    d = get_settings().data / "walktest"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / "current.jsonl"
+
+
 class IfaceReq(BaseModel):
     iface: str | None = None
+
+
+class WalkReq(IfaceReq):
+    label: str | None = None
+    target_ssid: str | None = None
+    target_bssid: str | None = None
 
 
 class Module(ModuleBase):
@@ -269,5 +297,58 @@ class Module(ModuleBase):
             return {"ok": True, "iface": iface, "current": link, "ssid": ssid,
                     "candidates": candidates, "roam_suggested": roam_suggested,
                     "best_bssid": best["bssid"] if best else None}
+
+        # ----- A6: walk-test signal tracker (heatmap / dead-zone finder) -----
+        @r.post("/walk/sample")
+        async def walk_sample_ep(req: WalkReq) -> dict[str, Any]:
+            """Record one RSSI sample at the current spot (tag it with a room/waypoint label)."""
+            iface = await _wifi_iface(req.iface)
+            link = await _link(iface)
+            tb = req.target_bssid.lower() if req.target_bssid else None
+            target_ssid = req.target_ssid or (link.get("ssid") if link.get("connected") else None)
+            # Fast path: sampling the currently-associated AP -> live link RSSI (no scan, no conflict).
+            if link.get("connected") and not tb and target_ssid == link.get("ssid"):
+                rssi, bssid, channel, aps_visible = link.get("signal_dbm"), link.get("bssid"), None, None
+            else:
+                aps = await _scan(iface)
+                matches = [a for a in aps if (tb and a["bssid"] == tb) or (target_ssid and a["ssid"] == target_ssid)]
+                best = max(matches, key=lambda a: (a["signal_dbm"] if a["signal_dbm"] is not None else -999), default=None)
+                rssi = best["signal_dbm"] if best else None
+                bssid = best["bssid"] if best else None
+                channel = best["channel"] if best else None
+                aps_visible = len(aps)
+            sample = {"ts": int(time.time()), "label": req.label, "target": (tb or target_ssid),
+                      "rssi_dbm": rssi, "zone": _zone(rssi), "bssid": bssid,
+                      "channel": channel, "aps_visible": aps_visible}
+            with open(_walk_file(), "a") as f:
+                f.write(json.dumps(sample) + "\n")
+            return {"ok": True, "sample": sample}
+
+        @r.get("/walk/trace")
+        def walk_trace_ep() -> dict[str, Any]:
+            """The recorded trace + coverage summary (the heatmap data; dead-zone count)."""
+            p = _walk_file()
+            samples = []
+            if p.exists():
+                for line in p.read_text().splitlines():
+                    try:
+                        samples.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+            rssis = [s["rssi_dbm"] for s in samples if s.get("rssi_dbm") is not None]
+            zones: dict[str, int] = {}
+            for s in samples:
+                zones[s["zone"]] = zones.get(s["zone"], 0) + 1
+            summary = {"count": len(samples), "zones": zones, "dead_zones": zones.get("dead", 0),
+                       "min_dbm": min(rssis) if rssis else None, "max_dbm": max(rssis) if rssis else None,
+                       "avg_dbm": round(sum(rssis) / len(rssis), 1) if rssis else None}
+            return {"ok": True, "summary": summary, "samples": samples[-500:]}
+
+        @r.post("/walk/reset")
+        def walk_reset_ep() -> dict[str, Any]:
+            p = _walk_file()
+            if p.exists():
+                p.unlink()
+            return {"ok": True, "reset": True}
 
         return r
