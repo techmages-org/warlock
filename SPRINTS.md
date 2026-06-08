@@ -54,7 +54,21 @@ The deck is field utility gear first, security tool second. These slot beside `n
 
 ---
 
-## Track B — Control plane (AAR): identity → log → grants → ingest → producer *(NEXT)*
+## Track B — Control plane (AAR): identity → log → grants → ingest → producer
+
+**Status (2026-06-07):** B1 (did:web docs) ✅ · B2 enrollment/registry ✅ · B3 grants ✅ ·
+B4 deck producer ✅ (live: revoked→403 logged, re-enrolled→AAR 202 L1 + report 202, engagement
+view shows grant+AAR+custody) · B5 **BLOCKED-NEEDS-OPERATOR**.
+
+**B2 caveat found during B5:** the *enrollment/registry* half of B2 is done, but the
+"deck attaches `log` → records reach **full L3**" half was left **config-only**
+(`aar_log_host` is an unused string; live records verify at **L1**, no `log` commitment).
+No L3 verifier exists yet (the ingest's `aar-verify.mjs` ladder stops at L2; the
+frontier-infra spec is v0.02 and does not yet define an L3 verifier). So **B5's L3
+half is a real cross-component build + an architecture decision**, and its "resolve
+`sig.by` **online**" half is **B1-hosting-gated** (operator must host the did:web docs).
+Landed regardless: `verify.html` did:web path-suffix fix (a real deck AAR now resolves
+to `/<path>/did.json`; verified L1 offline). Awaiting operator steer on the L3 model.
 
 - **B1 — P0 identity.** GOAL: the org principal + each console resolve over `did:web`.
   ACCEPTANCE: `id.techmages.org/.well-known/did.json` live (CORS `*`); console
