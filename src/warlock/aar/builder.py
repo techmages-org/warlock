@@ -122,6 +122,10 @@ def build_record(*, kind: str, command: str, target: str, note: str, outcome: st
     prior = store.get_prior(subject)
     if prior:
         record["prior"] = prior  # L3 chain (forward-compat)
+    from warlock.aar import grant as _grant
+    gref = _grant.active_grant_ref()
+    if gref:
+        record["grant_ref"] = gref  # ties this attestation to the engagement grant (B3 scope binding)
     return record, preimage, task_id
 
 
