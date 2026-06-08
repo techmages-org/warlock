@@ -53,7 +53,7 @@ You don't have to write a line of code to make this project stronger.
 
 Found a way to bypass the gate, forge an attestation, or escalate beyond an
 authorized scope? **Do not open a public issue.** Open a private
-[GitHub security advisory](https://github.com/Titanium-Devops/warlock/security/advisories/new)
+[GitHub security advisory](https://github.com/techmages-org/warlock/security/advisories/new)
 instead. We'll work the fix with you and credit you when it ships.
 
 ## License
