@@ -227,16 +227,26 @@ a product you buy.
 
 ### 5.1 Bill of materials
 
-| Component | Detail |
-|---|---|
-| **Chassis** | ClockworkPi uConsole (handheld, keyboard, LCD, battery) |
-| **Compute** | Raspberry Pi **Compute Module 5**, 8 GB RAM (full CM5, eMMC) |
-| **Storage** | **4 TB NVMe** (Samsung SSD 990 EVO Plus) via M.2 — the deck **boots from NVMe** |
-| **Expansion** | **Hacker Gadgets AIO V2** board: RTL-SDR + LoRa **SX1262** + **GPS+PPS** + **PCF85063A RTC** + USB hub + USB 3.0 + RJ45 |
-| **Wi-Fi (attack)** | **MediaTek MT7961** USB adapter — monitor mode + injection |
-| **SDR (RX)** | RTL2838 (RTL-SDR) on the AIO; HackRF for TX/replay |
-| **GPS** | u-blox on UART (`/dev/ttyAMA0`) with 1PPS |
-| **Optional** | ESP32 companion (`esp32_companion` module) |
+| Component | Source | Detail |
+|---|---|---|
+| **Chassis** | [ClockworkPi](https://www.clockworkpi.com/uconsole) | uConsole (handheld, keyboard, LCD, battery) |
+| **Compute** | Raspberry Pi | **Compute Module 5**, 8 GB RAM (full CM5, eMMC). CM4 / Radxa CM5 also supported via the kit's adapter. |
+| **Upgrade kit** | [Hacker Gadgets](https://hackergadgets.com/products/uconsole-upgrade-kit?variant=47045223383214) | CM4/CM5 adapter + NVMe board + **dual-18650 battery** holder. **Boots from NVMe.** |
+| **Storage** | *(source your own)* | **Any M.2 NVMe SSD** — pick your capacity. The deck boots from it. |
+| **AIO V2** | [Hacker Gadgets](https://hackergadgets.com/products/uconsole-aio-v2?variant=47045380735150) | The radio board: RTL-SDR + LoRa **SX1262** + **GPS+PPS** + **PCF85063A RTC** + internal USB hub + USB 3.0 + RJ45 |
+| **Wi-Fi (attack)** | [Hacker Gadgets](https://hackergadgets.com/products/ac1200-usb-c-wifi-card) | **AC1200 USB-C Wi-Fi card** (MediaTek MT7961) — monitor mode + injection, rides the AIO's internal USB |
+| **SDR (RX)** | — | RTL2838 (RTL-SDR) on the AIO; HackRF for TX/replay |
+| **GPS** | — | u-blox on UART (`/dev/ttyAMA0`) with 1PPS (on the AIO) |
+| **Optional** | — | ESP32 companion (`esp32_companion` module) |
+
+> **Purchase config we run:** [uConsole Upgrade Kit](https://hackergadgets.com/products/uconsole-upgrade-kit?variant=47045223383214)
+> → Adapter **Raspberry Pi CM4/CM5**, NVMe board **With Dual 18650 Batteries Holder**,
+> Expansion Board **NONE** — then add the standalone
+> [**AIO V2**](https://hackergadgets.com/products/uconsole-aio-v2?variant=47045380735150)
+> (it carries the SDR / LoRa / GPS and the internal USB) and the
+> [**AC1200 USB-C Wi-Fi card**](https://hackergadgets.com/products/ac1200-usb-c-wifi-card).
+> Drop in a **CM5** and source any M.2 NVMe. None of this deck exists without
+> **[Hacker Gadgets](https://hackergadgets.com)**.
 
 ### 5.2 OS & boot
 

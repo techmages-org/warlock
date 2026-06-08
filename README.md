@@ -14,6 +14,7 @@
 [![Posture](https://img.shields.io/badge/posture-authorization--first-F0A830?labelColor=0A0B10)](#-the-engagement-gate)
 [![License](https://img.shields.io/badge/license-MIT-5FEFA0?labelColor=0A0B10)](LICENSE)
 [![by TechMages](https://img.shields.io/badge/by-TechMages-9B8CF0?labelColor=0A0B10)](https://techmages.org)
+[![Hardware by Hacker Gadgets](https://img.shields.io/badge/hardware-Hacker_Gadgets-FF6B35?labelColor=0A0B10)](https://hackergadgets.com)
 
 </div>
 
@@ -229,17 +230,26 @@ hardware BOM, and the staged build playbook — lives in **[docs/OVERVIEW.md](do
 
 ## 🛠️ The cyberdeck (build-your-own)
 
-Warlock is a build, not a product you buy. The short bill of materials:
+Warlock is a build, not a product you buy — and the build is only possible because of the
+boards from **[Hacker Gadgets](https://hackergadgets.com)**, who turn a ClockworkPi uConsole
+into a real cyberdeck. **This project couldn't exist without their hardware.**
 
-| Component | Detail |
-|---|---|
-| **Chassis** | ClockworkPi uConsole (handheld: keyboard, LCD, battery) |
-| **Compute** | Raspberry Pi **Compute Module 5**, 8 GB |
-| **Storage** | 4 TB NVMe (M.2) — the deck **boots from NVMe** |
-| **Expansion** | Hacker Gadgets **AIO V2**: RTL-SDR + LoRa **SX1262** + GPS+PPS + RTC + USB hub + RJ45 |
-| **Wi-Fi (attack)** | MediaTek **MT7961** USB — monitor mode + injection |
-| **SDR** | RTL-SDR (RX) on the AIO; **HackRF** for TX/replay |
-| **OS** | Debian 13 (trixie), aarch64 |
+| Component | Source | Detail |
+|---|---|---|
+| **Chassis** | [ClockworkPi](https://www.clockworkpi.com/uconsole) | uConsole — handheld keyboard, LCD, battery |
+| **Compute** | Raspberry Pi | **Compute Module 5** (CM4 / Radxa CM5 also supported) |
+| **Upgrade kit** | [Hacker Gadgets](https://hackergadgets.com/products/uconsole-upgrade-kit?variant=47045223383214) | CM4/CM5 adapter + NVMe board + **dual-18650 battery**. **Boots from NVMe.** |
+| **Storage** | *source your own* | **Any M.2 NVMe SSD** — your choice of capacity |
+| **AIO V2** | [Hacker Gadgets](https://hackergadgets.com/products/uconsole-aio-v2?variant=47045380735150) | The radio board: **RTL-SDR + LoRa SX1262 + GPS/PPS + RTC + internal USB hub + RJ45** |
+| **AC1200 Wi-Fi** | [Hacker Gadgets](https://hackergadgets.com/products/ac1200-usb-c-wifi-card) | AC1200 USB-C card — **monitor mode + injection**, rides the AIO's internal USB |
+| **SDR (TX)** | — | **HackRF** for replay/transmit (RX is the AIO's RTL-SDR) |
+| **OS** | — | Debian 13 (trixie), aarch64 |
+
+> 🛒 **Exact config we run:** Upgrade Kit → Adapter **Raspberry Pi CM4/CM5**, NVMe board
+> **With Dual 18650 Batteries Holder**, Expansion Board **NONE** — then add the standalone
+> **AIO V2** (it carries the SDR / LoRa / GPS and the internal USB) and the **AC1200 USB-C
+> Wi-Fi card** for monitor mode. Drop in a **CM5**, source any M.2 NVMe, and you have the
+> deck Warlock runs on.
 
 Full wiring, GPIO power-rail map, and per-subsystem health probes are in
 [docs/OVERVIEW.md §5](docs/OVERVIEW.md).
@@ -276,10 +286,28 @@ Start with **[CONTRIBUTING.md](CONTRIBUTING.md)** and the
 
 ---
 
+## 🙏 Acknowledgments
+
+Warlock OS is software, but it runs on hardware — and the cyberdeck simply wouldn't exist
+without **[Hacker Gadgets](https://hackergadgets.com)**. Their
+[uConsole Upgrade Kit](https://hackergadgets.com/products/uconsole-upgrade-kit?variant=47045223383214),
+[AIO V2](https://hackergadgets.com/products/uconsole-aio-v2?variant=47045380735150) (SDR + LoRa
++ GPS + internal USB + RJ45), and
+[AC1200 USB-C Wi-Fi card](https://hackergadgets.com/products/ac1200-usb-c-wifi-card) (monitor
+mode) are what give the deck its radios, its wired uplink, and its NVMe boot. **Thank you — this
+couldn't be done without you.**
+
+Built on the [ClockworkPi uConsole](https://www.clockworkpi.com/uconsole) and the
+[Raspberry Pi](https://www.raspberrypi.com) Compute Module 5. An open project of
+**[Titanium Computing](https://techmages.org)**.
+
+<!-- LOGO_STRIP -->
+
 ## 📜 License
 
 Code and documentation are released under the **[MIT License](LICENSE)**. Names and marks are
-reserved. By contributing you agree your contributions are licensed under the repository's terms.
+reserved by their respective owners. By contributing you agree your contributions are licensed
+under the repository's terms.
 
 <div align="center">
 
