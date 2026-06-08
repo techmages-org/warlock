@@ -45,8 +45,13 @@ class Settings(BaseSettings):
     aar_did_base: str = Field(default="did:web:decks.techmages.org", description="did:web base for the deck subject")
     aar_deck_id: str = Field(default="warlock-cm5-01", description="deck id suffix → subject = <did_base>:<deck_id>")
     aar_principal_did: str = Field(default="did:web:id.techmages.org", description="principal DID (the authorizing org) — served from a controlled host (id.), not the WordPress apex")
-    # Transparency-log host for L3 pinning (stored for later; NOT contacted at L1 sign time).
-    aar_log_host: str = Field(default="log.techmages.org", description="transparency-log host (L3, config only)")
+    # Transparency-log host for L3 — the LOGICAL log identity recorded in each
+    # AAR's `log` receipt (a verifier resolves it to fetch the log + its key).
+    aar_log_host: str = Field(default="log.techmages.org", description="transparency-log host (logical identity in log.host)")
+    # Transparency-log SUBMIT endpoint (POST {hash} -> signed leaf receipt). When
+    # set, each emitted AAR best-effort commits sha256(canonical(record)) to the
+    # log and embeds the receipt as `log` (→ L3). Empty = no log-attach (stays L1).
+    aar_log_url: str = Field(default="", description="transparency-log submit URL (POST /v1/log); empty disables L3 log-attach")
 
     mesh_host: str = Field(default="127.0.0.1")
     mesh_port: int = Field(default=4403)
