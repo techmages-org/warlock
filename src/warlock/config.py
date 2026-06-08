@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     # did:web identity. subject = the deck; principal = the org that answers for it.
     aar_did_base: str = Field(default="did:web:decks.techmages.org", description="did:web base for the deck subject")
     aar_deck_id: str = Field(default="warlock-cm5-01", description="deck id suffix → subject = <did_base>:<deck_id>")
-    aar_principal_did: str = Field(default="did:web:techmages.org", description="principal DID (the authorizing org)")
+    aar_principal_did: str = Field(default="did:web:id.techmages.org", description="principal DID (the authorizing org) — served from a controlled host (id.), not the WordPress apex")
     # Transparency-log host for L3 pinning (stored for later; NOT contacted at L1 sign time).
     aar_log_host: str = Field(default="log.techmages.org", description="transparency-log host (L3, config only)")
 
