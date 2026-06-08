@@ -20,6 +20,7 @@ import os
 import re
 import shutil
 import time
+from collections import deque
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -224,8 +225,168 @@ def _walk_file():
     return d / "current.jsonl"
 
 
+# ===== A6b: AP Location Finder (monitor-mode beacon RSSI "fox hunt") ==========
+# Lock the MT7921 to a target's channel, sniff its beacons via tshark, and read
+# per-beacon radiotap RSSI (~10/s) → a smooth real-time homing meter. Relative
+# proximity (warmer/colder + peak-hold) is reliable; absolute distance from RSSI
+# is NOT (walls/multipath/TX-power vary), so distance is a COARSE, caveated band.
+MT_HELPER = "/usr/local/bin/wlan-mt7921"
+
+_LOCATE: dict[str, Any] = {}                  # active session metadata
+_locate_proc: asyncio.subprocess.Process | None = None
+_locate_task: asyncio.Task | None = None
+_locate_samples: deque[tuple[float, int]] = deque(maxlen=512)  # (epoch, dbm)
+
+
+def _est_distance_ft(dbm: float | None) -> int | None:
+    """COARSE log-distance estimate (txref -40 dBm @1m, path-loss n=3). Indicative
+    only — indoors this is easily off by 2-3×; the meter leans on trend, not this."""
+    if dbm is None:
+        return None
+    d_m = 10 ** ((-40.0 - dbm) / (10 * 3.0))
+    return max(1, round(d_m * 3.28084))
+
+
+def _proximity_band(dbm: float | None) -> str:
+    if dbm is None:
+        return "no-signal"
+    if dbm >= -45:
+        return "very close"
+    if dbm >= -60:
+        return "close"
+    if dbm >= -72:
+        return "near"
+    return "far"
+
+
+async def _locate_reader(proc: asyncio.subprocess.Process) -> None:
+    """Append (ts, dbm) per beacon. radiotap.dbm_antsignal may be multi-antenna
+    ('-40,-42') — take the strongest. Tracks the running peak (closest approach)."""
+    assert proc.stdout is not None
+    while True:
+        raw = await proc.stdout.readline()
+        if not raw:
+            break
+        parts = raw.decode(errors="replace").split()
+        if len(parts) < 2:
+            continue
+        try:
+            ts = float(parts[0])
+            dbm = max(int(float(x)) for x in parts[1].split(",") if x)
+        except (ValueError, IndexError):
+            continue
+        _locate_samples.append((ts, dbm))
+        if _LOCATE.get("peak") is None or dbm > _LOCATE["peak"]:
+            _LOCATE["peak"] = dbm
+            _LOCATE["peak_ts"] = ts
+
+
+async def _locate_start(bssid: str, channel: int | None, iface: str | None) -> dict[str, Any]:
+    global _locate_proc, _locate_task
+    if _LOCATE.get("active"):
+        raise HTTPException(409, "locate already running — stop it first")
+    from warlock.modules import wifi_recon  # the dongle is shared with the recon sweep
+    if wifi_recon._is_running():
+        raise HTTPException(409, "stop the WiFi Recon sweep first — it owns the radio")
+    bssid = bssid.lower().strip()
+    if not re.fullmatch(r"[0-9a-f:]{17}", bssid):
+        raise HTTPException(400, "bssid must be a MAC (aa:bb:cc:dd:ee:ff)")
+    ssid = None
+    if not channel:  # discover the channel + ssid via one managed scan
+        aps = await _scan(await _wifi_iface(iface))
+        m = next((a for a in aps if a["bssid"] == bssid), None)
+        if not m or not m.get("channel"):
+            raise HTTPException(404, "target not seen in a scan — pass its channel")
+        channel, ssid = m["channel"], m.get("ssid")
+    if not _tool("tshark"):
+        raise HTTPException(500, "tshark not installed")
+    # Monitor mode (helper handles privilege, as in wifi_recon), then lock channel.
+    rc, out, err = await _run([MT_HELPER, "monitor"], timeout=12)
+    if rc != 0:
+        raise HTTPException(500, f"monitor-mode setup failed: {(out + err).strip()[:200]}")
+    mon = "mon0"
+    await _run([_tool("iw"), "dev", mon, "set", "channel", str(channel)], sudo=True, timeout=6)
+    argv = [
+        _tool("tshark"), "-i", mon, "-l", "-n",
+        "-Y", f"wlan.bssid=={bssid} && (wlan.fc.type_subtype==0x08||wlan.fc.type_subtype==0x05)",
+        "-T", "fields", "-e", "frame.time_epoch", "-e", "radiotap.dbm_antsignal",
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+    )
+    _locate_samples.clear()
+    _LOCATE.clear()
+    _LOCATE.update({"active": True, "bssid": bssid, "channel": channel, "ssid": ssid,
+                    "started": time.time(), "peak": None, "peak_ts": None})
+    _locate_proc = proc
+    _locate_task = asyncio.create_task(_locate_reader(proc))
+    return {"ok": True, "bssid": bssid, "channel": channel, "ssid": ssid}
+
+
+def _locate_sample() -> dict[str, Any]:
+    if not _LOCATE.get("active"):
+        return {"ok": True, "active": False}
+    now = time.time()
+    samples = list(_locate_samples)
+    recent = [(t, d) for (t, d) in samples if now - t <= 10]
+    base = {"ok": True, "active": True, "bssid": _LOCATE.get("bssid"),
+            "channel": _LOCATE.get("channel"), "ssid": _LOCATE.get("ssid"),
+            "peak_dbm": _LOCATE.get("peak")}
+    if not recent:
+        return {**base, "rssi_dbm": None, "trend": "no-signal", "delta": None,
+                "rate_hz": 0, "samples": 0, "proximity": "no-signal", "est_range_ft": None,
+                "peak_ago_s": None}
+    smoothed = round(sum(d for _, d in recent[-5:]) / len(recent[-5:]))
+    win_new = [d for (t, d) in recent if now - t <= 2.0]
+    win_old = [d for (t, d) in recent if 2.0 < now - t <= 5.0]
+    delta, trend = None, "steady"
+    if win_new and win_old:
+        delta = round(sum(win_new) / len(win_new) - sum(win_old) / len(win_old))
+        trend = "warmer" if delta >= 2 else "colder" if delta <= -2 else "steady"
+    peak_ts = _LOCATE.get("peak_ts")
+    return {
+        **base,
+        "rssi_dbm": smoothed,
+        "raw_dbm": recent[-1][1],
+        "trend": trend,
+        "delta": delta,
+        "rate_hz": sum(1 for (t, _) in samples if now - t <= 1.0),
+        "samples": len(recent),
+        "proximity": _proximity_band(smoothed),
+        "est_range_ft": _est_distance_ft(smoothed),
+        "peak_ago_s": round(now - peak_ts, 1) if peak_ts else None,
+    }
+
+
+async def _locate_stop() -> dict[str, Any]:
+    global _locate_proc, _locate_task
+    if _locate_task is not None:
+        _locate_task.cancel()
+        _locate_task = None
+    if _locate_proc is not None:
+        try:
+            _locate_proc.terminate()
+        except ProcessLookupError:
+            pass
+        _locate_proc = None
+    helper = ""
+    try:
+        _, o, e = await _run([MT_HELPER, "managed"], timeout=12)
+        helper = (o + e).strip()
+    except Exception as ex:  # noqa: BLE001
+        log.warning("locate stop: managed restore failed: %s", ex)
+    _LOCATE.clear()
+    _locate_samples.clear()
+    return {"ok": True, "helper": helper}
+
+
 class IfaceReq(BaseModel):
     iface: str | None = None
+
+
+class LocateReq(IfaceReq):
+    bssid: str
+    channel: int | None = None
 
 
 class WalkReq(IfaceReq):
@@ -351,4 +512,27 @@ class Module(ModuleBase):
                 p.unlink()
             return {"ok": True, "reset": True}
 
+        # ----- A6b: AP location finder (monitor-mode beacon RSSI homing meter) -----
+        @r.post("/locate/start")
+        async def locate_start_ep(req: LocateReq) -> dict[str, Any]:
+            """Lock onto a target BSSID and begin streaming its beacon RSSI."""
+            return await _locate_start(req.bssid, req.channel, req.iface)
+
+        @r.get("/locate/sample")
+        def locate_sample_ep() -> dict[str, Any]:
+            """Latest smoothed RSSI + warmer/colder trend + peak-hold + coarse range."""
+            return _locate_sample()
+
+        @r.post("/locate/stop")
+        async def locate_stop_ep() -> dict[str, Any]:
+            """Stop the locate session and return the radio to managed mode."""
+            return await _locate_stop()
+
         return r
+
+    async def on_shutdown(self) -> None:
+        if _LOCATE.get("active"):
+            try:
+                await _locate_stop()
+            except Exception:  # noqa: BLE001
+                log.exception("wifi_analyzer locate shutdown stop failed")
