@@ -149,6 +149,10 @@ class EngagementMode:
             )
         )
         self._append_audit("ENGAGEMENT_STARTED", {"name": name})
+        # Engagement-as-grant (B3): mint a principal-signed acp_grant before the first AAR so
+        # every attestation under this engagement carries its grant_ref (scope binding).
+        from warlock.aar import grant as _grant
+        _grant.mint_grant(engagement_id=self.engagement_id, scope=scope, name=name)
         _emit_aar("engagement.started", f"engagement {name!r} id={self.engagement_id}", "started")
         await events.bus.publish(
             events.ENGAGEMENT_STARTED,
@@ -210,6 +214,8 @@ class EngagementMode:
         self._append_audit("ENGAGEMENT_ENDED", {})
         _emit_aar("engagement.ended", f"engagement id={eid}", "ended")
         self._mode = "off"
+        from warlock.aar import grant as _grant
+        _grant.clear_active()  # grant_ref no longer stamped once the engagement closes
         await events.bus.publish(events.ENGAGEMENT_ENDED, {"engagement_id": eid})
         self.engagement_id = None
         self.name = ""
