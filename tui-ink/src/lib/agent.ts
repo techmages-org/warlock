@@ -150,6 +150,8 @@ export const READ_ENDPOINTS: ReadEndpoint[] = [
   { name: "rtl433_events", label: "rtl_433 events", description: "Recent rtl_433 ISM-band sensor/device events decoded by the SDR (last 20).", path: "/api/sdr/rtl433/events?n=20" },
   { name: "mesh_nodes", label: "Mesh", description: "Meshtastic mesh nodes currently visible (node id, name, SNR, last heard, position).", path: "/api/mesh/nodes" },
   { name: "gps_fix", label: "GPS", description: "Current GPS fix: mode, latitude/longitude, satellites and accuracy.", path: "/api/gps/fix" },
+  { name: "netdiag_status", label: "Net diag", description: "Network-diagnostics status: the primary interface, default gateway, and which Fluke-class tools (ethtool/lldp/iperf3/mtr) are available for wired/wireless link + path testing.", path: "/api/netdiag/status" },
+  { name: "wifi_analyzer_status", label: "Wi-Fi analyzer", description: "Wireless-analyzer status: the active wifi interface and the current association (SSID/BSSID/signal). Use before a survey/walk-test.", path: "/api/wifi_analyzer/status" },
 ];
 
 // Wrap one read endpoint as a PI AgentTool. The handler does a single GET and
@@ -501,6 +503,40 @@ export const ACTION_ENDPOINTS: ActionEndpoint[] = [
     build: (p) => compact({ capture: p.capture, path: p.path }),
     gated: false,
     kind: "rf",
+  },
+  // ---- Field diagnostics (A1–A11; non-gated, blue-team/local) --------------- //
+  {
+    name: "netdiag_health",
+    label: "Network health check",
+    description:
+      "Run the one-button wired+wireless network HEALTH check (link speed/duplex, gateway packet-loss/latency/jitter, DHCP, DNS, path-MTU) and return a PASS/WARN/FAIL verdict per check. Local/blue-team — no engagement needed. Use this to answer 'is the network healthy / what's wrong with this connection'.",
+    path: "/api/netdiag/health",
+    parameters: Type.Object({ iface: Type.Optional(Type.String({ description: "Interface to test (default: the primary/default-route iface)." })) }),
+    build: (p) => compact({ iface: p.iface }),
+    gated: false,
+    kind: "audit",
+  },
+  {
+    name: "wifi_survey",
+    label: "Wi-Fi survey",
+    description:
+      "Survey the wireless environment: AP map (BSSID/SSID/band/channel/RSSI/quality), per-band channel congestion, and a least-congested-channel recommendation. Local/blue-team. Use for 'survey the wifi / which channel is clearest / why is the signal weak'.",
+    path: "/api/wifi_analyzer/scan",
+    parameters: Type.Object({ iface: Type.Optional(Type.String({ description: "Wi-Fi interface (default: the connected one)." })) }),
+    build: (p) => compact({ iface: p.iface }),
+    gated: false,
+    kind: "recon",
+  },
+  {
+    name: "network_report",
+    label: "Network health report",
+    description:
+      "Generate the one-button site-survey / network-health REPORT — aggregates link, reachability, services (DHCP/rogue-DHCP/DNS/WAN/NTP) and wireless into one overall verdict and saves a client-ready HTML report. Use when asked to 'run a full network check' or 'make me a report'.",
+    path: "/api/report/generate",
+    parameters: Type.Object({ iface: Type.Optional(Type.String()) }),
+    build: (p) => compact({ iface: p.iface }),
+    gated: false,
+    kind: "audit",
   },
 ];
 
