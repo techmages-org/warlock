@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
+import json
 import logging
 import os
 import shutil
@@ -113,6 +114,152 @@ def _clear_state() -> None:
             p.unlink()
         except FileNotFoundError:
             pass
+
+
+# --- wardriving geo-stamping --------------------------------------------------
+# Each discovered BSSID is stamped, ONCE at first sighting, with the deck's GPS
+# fix at that moment (or nulls when there's no fix) — the standard wardriving
+# datapoint "where were we when we discovered this AP". Stamps live in a sidecar
+# JSON next to the capture so they survive screen reloads + a backend restart.
+
+def _now_local() -> str:
+    """airodump-compatible local timestamp (its CSV 'Last time seen' format).
+    Local — not UTC — so it sorts/compares directly against airodump's column."""
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _geo_path(prefix: Path) -> Path:
+    return prefix.with_name(prefix.name + "-geo.json")
+
+
+def _read_geo(prefix: Path) -> dict[str, Any]:
+    p = _geo_path(prefix)
+    if not p.exists():
+        return {"cleared_at": None, "stamps": {}}
+    try:
+        data = json.loads(p.read_text())
+        data.setdefault("cleared_at", None)
+        data.setdefault("stamps", {})
+        return data
+    except Exception:  # noqa: BLE001 — a corrupt sidecar must not break recon
+        return {"cleared_at": None, "stamps": {}}
+
+
+def _write_geo(prefix: Path, data: dict[str, Any]) -> None:
+    try:
+        _geo_path(prefix).write_text(json.dumps(data))
+    except OSError as e:
+        log.warning("geo sidecar write failed: %s", e)
+
+
+def _current_gps_fix() -> dict[str, Any] | None:
+    """The deck's current GPS position, or None when there is no fix. Lazy import
+    keeps the modules decoupled; any gpsd hiccup just yields None (→ null stamp)."""
+    try:
+        from warlock.modules import gps
+
+        return gps.current_position()
+    except Exception:  # noqa: BLE001 — geo is best-effort; never break recon
+        return None
+
+
+def _geostamp(prefix: Path) -> None:
+    """Stamp every not-yet-seen BSSID with the current GPS fix (or nulls). Honors
+    the clear baseline: APs whose last sighting predates a clear are skipped."""
+    csv_path = _latest_csv(prefix)
+    if not csv_path:
+        return
+    aps, _ = _parse_airodump_csv(csv_path)
+    if not aps:
+        return
+    geo = _read_geo(prefix)
+    stamps: dict[str, Any] = geo["stamps"]
+    cleared_at = geo.get("cleared_at")
+    fix = _current_gps_fix()
+    changed = False
+    for ap in aps:
+        bssid = ap.get("bssid")
+        if not bssid or bssid in stamps:
+            continue
+        last_seen = ap.get("last_seen") or ""
+        if cleared_at and last_seen and last_seen <= cleared_at:
+            continue  # belongs to the pre-clear list
+        if fix:
+            stamps[bssid] = {
+                "lat": fix.get("lat"), "lon": fix.get("lon"), "alt": fix.get("alt"),
+                "fixed": True, "gps_time": fix.get("time"), "at": _now_local(),
+            }
+        else:
+            stamps[bssid] = {
+                "lat": None, "lon": None, "alt": None,
+                "fixed": False, "gps_time": None, "at": _now_local(),
+            }
+        changed = True
+    if changed:
+        _write_geo(prefix, geo)
+
+
+def _merge_geo(prefix: Path, aps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach lat/lon/alt/geo_fixed to each AP and drop pre-clear rows."""
+    geo = _read_geo(prefix)
+    stamps = geo.get("stamps", {})
+    cleared_at = geo.get("cleared_at")
+    out: list[dict[str, Any]] = []
+    for ap in aps:
+        if cleared_at and (ap.get("last_seen") or "") and (ap.get("last_seen") or "") <= cleared_at:
+            continue
+        g = stamps.get(ap.get("bssid")) or {}
+        ap["lat"] = g.get("lat")
+        ap["lon"] = g.get("lon")
+        ap["alt"] = g.get("alt")
+        ap["geo_fixed"] = bool(g.get("fixed"))
+        out.append(ap)
+    return out
+
+
+_EXPORT_COLS = [
+    "bssid", "essid", "channel", "encryption", "cipher", "auth", "signal",
+    "beacons", "ivs", "wps", "lat", "lon", "alt", "geo_fixed", "first_seen", "last_seen",
+]
+
+
+def _build_csv(aps: list[dict[str, Any]]) -> str:
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(_EXPORT_COLS)
+    for a in aps:
+        w.writerow(["" if a.get(c) is None else a.get(c) for c in _EXPORT_COLS])
+    return buf.getvalue()
+
+
+def _xml_escape(s: str) -> str:
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            .replace('"', "&quot;"))
+
+
+def _build_kml(aps: list[dict[str, Any]]) -> str:
+    """KML with a Placemark per GPS-located AP (skips null-coord rows) so the
+    capture drops straight onto Google Earth / any mapping tool."""
+    marks: list[str] = []
+    for a in aps:
+        lat, lon = a.get("lat"), a.get("lon")
+        if lat is None or lon is None:
+            continue
+        name = _xml_escape(a.get("essid") or a.get("bssid") or "AP")
+        alt = a.get("alt") or 0
+        desc = _xml_escape(
+            f"BSSID {a.get('bssid')} · ch {a.get('channel')} · {a.get('encryption')} "
+            f"{a.get('cipher')} {a.get('auth')} · {a.get('signal')} dBm"
+        )
+        marks.append(
+            f"<Placemark><name>{name}</name><description>{desc}</description>"
+            f"<Point><coordinates>{lon},{lat},{alt}</coordinates></Point></Placemark>"
+        )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<kml xmlns="http://www.opengis.net/kml/2.2"><Document>'
+        "<name>Warlock WiFi Recon</name>" + "".join(marks) + "</Document></kml>\n"
+    )
 
 
 def _iface_exists(iface: str) -> bool:
@@ -492,6 +639,13 @@ async def _watchdog(
         await asyncio.sleep(poll_s)
         if not _is_running():
             return  # airodump exited (e.g. via /stop) — nothing to guard
+        # Wardriving geo-stamp (best-effort): stamp newly-seen APs with the GPS
+        # fix at discovery. Fully guarded — a geo error must NEVER break the
+        # spin-guard below (its job is to kill a wedged airodump).
+        try:
+            _geostamp(prefix)
+        except Exception:  # noqa: BLE001
+            log.exception("wifi_recon geostamp failed (non-fatal)")
         reason: str | None = None
         if not _iface_ready(iface):
             reason = f"capture interface {iface} vanished or went down"
@@ -587,8 +741,57 @@ class Module(ModuleBase):
             if not csv_path:
                 return {"ok": True, "aps": [], "running": _is_running()}
             aps, _ = _parse_airodump_csv(csv_path)
+            aps = _merge_geo(Path(st["prefix"]), aps)
             aps.sort(key=lambda a: -(a.get("signal") or -120))
-            return {"ok": True, "aps": aps, "count": len(aps), "csv": csv_path.name}
+            with_coords = sum(1 for a in aps if a.get("lat") is not None)
+            return {
+                "ok": True, "aps": aps, "count": len(aps),
+                "with_coords": with_coords, "csv": csv_path.name,
+            }
+
+        @r.post("/clear")
+        def clear() -> dict[str, Any]:
+            """Reset the AP list: set a clear baseline (APs last seen at/before now
+            are hidden) and drop accumulated geo-stamps. Non-destructive — the scan
+            keeps running and still-present APs re-appear (and re-stamp) as re-seen."""
+            st = _read_state()
+            prefix = st.get("prefix")
+            if not prefix:
+                return {"ok": True, "cleared": 0, "note": "no active scan"}
+            p = Path(prefix)
+            geo = _read_geo(p)
+            cleared_stamps = len(geo.get("stamps", {}))
+            geo["cleared_at"] = _now_local()
+            geo["stamps"] = {}
+            _write_geo(p, geo)
+            return {"ok": True, "cleared_at": geo["cleared_at"], "cleared_stamps": cleared_stamps}
+
+        @r.post("/export")
+        def export() -> dict[str, Any]:
+            """Write the current AP list (with coords) to CSV + KML on the deck and
+            return the paths + counts. KML maps the GPS-located APs."""
+            st = _read_state()
+            prefix = st.get("prefix")
+            if not prefix:
+                raise HTTPException(409, "no scan to export (start a sweep first)")
+            csv_path = _latest_csv(Path(prefix))
+            aps: list[dict[str, Any]] = []
+            if csv_path:
+                aps, _ = _parse_airodump_csv(csv_path)
+                aps = _merge_geo(Path(prefix), aps)
+                aps.sort(key=lambda a: -(a.get("signal") or -120))
+            exports = _captures_dir() / "exports"
+            exports.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            csv_out = exports / f"wifi-recon-{stamp}.csv"
+            kml_out = exports / f"wifi-recon-{stamp}.kml"
+            csv_out.write_text(_build_csv(aps))
+            kml_out.write_text(_build_kml(aps))
+            with_coords = sum(1 for a in aps if a.get("lat") is not None)
+            return {
+                "ok": True, "count": len(aps), "with_coords": with_coords,
+                "csv": csv_out.as_posix(), "kml": kml_out.as_posix(),
+            }
 
         @r.get("/clients")
         def clients() -> dict[str, Any]:

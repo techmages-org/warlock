@@ -105,6 +105,19 @@ def _fix_snapshot() -> dict[str, Any]:
     return out
 
 
+def current_position() -> dict[str, Any] | None:
+    """Best-effort current GPS fix for geo-stamping callers (e.g. wifi_recon
+    wardriving). Returns ``{lat, lon, alt, time, mode}`` only when there is a real
+    2D+ fix; ``None`` otherwise (no fix / gpsd down) so the caller records nulls."""
+    snap = _fix_snapshot()
+    if not snap.get("ok") or (snap.get("mode") or 0) < 2:
+        return None
+    lat, lon = snap.get("lat"), snap.get("lon")
+    if lat is None or lon is None:
+        return None
+    return {"lat": lat, "lon": lon, "alt": snap.get("alt"), "time": snap.get("time"), "mode": snap.get("mode")}
+
+
 def _sats_snapshot() -> dict[str, Any]:
     c = get_client()
     sky = c.last_sky

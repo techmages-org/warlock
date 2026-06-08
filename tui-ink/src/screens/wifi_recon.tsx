@@ -27,7 +27,11 @@ import { COLORS, TEXT, type LEDColor } from "../lib/theme.js";
 
 const CHROME_ROWS = 8;
 
-type AP = { bssid: string; essid: string; channel: number; encryption: string; signal: number; beacons: number; wps: boolean };
+type AP = {
+  bssid: string; essid: string; channel: number; encryption: string; signal: number;
+  beacons: number; wps: boolean;
+  lat: number | null; lon: number | null; alt: number | null; geo_fixed: boolean;
+};
 type Client = { station: string; associated: string | null; probes: string[]; power: number; packets: number };
 type Handshake = { filename: string; path: string; size_bytes: number; eapol: boolean; networks: string[] };
 
@@ -166,6 +170,33 @@ export function Screen() {
       setBusy(false);
     }
   };
+  const clearList = async () => {
+    setBusy(true);
+    try {
+      const r = await api.post<{ cleared_stamps?: number }>("/api/wifi_recon/clear");
+      setAps([]);
+      setListSel(0);
+      setNote(`list cleared (${r?.cleared_stamps ?? 0} geo-stamps reset) — re-accumulating`);
+    } catch (e) {
+      setNote(`clear failed: ${e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const exportList = async () => {
+    setBusy(true);
+    try {
+      const r = await api.post<{ count: number; with_coords: number; csv: string; kml: string }>(
+        "/api/wifi_recon/export",
+      );
+      const file = (r?.csv || "").split("/").pop() ?? "export";
+      setNote(`exported ${r?.count ?? 0} APs (${r?.with_coords ?? 0} geo) → ${file} + .kml`);
+    } catch (e) {
+      setNote(`export failed: ${e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const activeLen = () => {
     const v = viewRef.current;
@@ -193,6 +224,8 @@ export function Screen() {
         const n = activeLen();
         if (key.upArrow) setListSel((v) => clamp(v - 1, 0, Math.max(0, n - 1)));
         else if (key.downArrow) setListSel((v) => clamp(v + 1, 0, Math.max(0, n - 1)));
+        else if (input === "c" && !busyRef.current) void clearList();
+        else if (input === "e" && !busyRef.current) void exportList();
       }
     },
     { isActive: rawOk },
@@ -279,7 +312,7 @@ export function Screen() {
 
       <Box>
         <Text color={TEXT.dim} wrap="truncate-end">
-          Tab/1–4 view{view === "control" ? " · ←/→ channels · s start · x stop" : " · ↑/↓ scroll"}
+          Tab/1–4 view{view === "control" ? " · ←/→ channels · s start · x stop" : " · ↑/↓ scroll · c clear · e export"}
         </Text>
       </Box>
     </Box>
@@ -291,33 +324,42 @@ function MoreLine({ more, pos, total }: { more: number; pos: number; total: numb
   return <Text color={TEXT.dim}>  +{more} more — ↑/↓ to scroll ({pos}/{total})</Text>;
 }
 
+function gpsCell(a: AP): { text: string; color: LEDColor | "dim" } {
+  if (a.lat != null && a.lon != null) {
+    return { text: `${a.lat.toFixed(4)},${a.lon.toFixed(4)}`, color: "mint" };
+  }
+  return { text: a.geo_fixed === false && (a.lat === null) ? "no-fix" : "—", color: "dim" };
+}
+
 function APsView({ aps, cols, sel, cap }: { aps: AP[]; cols: number; sel: number; cap: number }) {
   const win = windowOf(aps, sel, cap);
+  const geoCount = aps.filter((a) => a.lat != null).length;
   return (
-    <Tile title={`ACCESS POINTS (${aps.length})`} led={aps.length > 0 ? "mint" : "amber"} width={cols - 1}>
+    <Tile title={`ACCESS POINTS (${aps.length} · ${geoCount} geo)`} led={aps.length > 0 ? "mint" : "amber"} width={cols - 1}>
       <Box>
         <Box width={3}><Text color={TEXT.dim}> </Text></Box>
-        <Box width={20}><Text color={TEXT.dim}>BSSID</Text></Box>
-        <Box width={20}><Text color={TEXT.dim}>ESSID</Text></Box>
-        <Box width={5}><Text color={TEXT.dim}>CH</Text></Box>
-        <Box width={12}><Text color={TEXT.dim}>ENC</Text></Box>
+        <Box width={18}><Text color={TEXT.dim}>BSSID</Text></Box>
+        <Box width={18}><Text color={TEXT.dim}>ESSID</Text></Box>
+        <Box width={4}><Text color={TEXT.dim}>CH</Text></Box>
+        <Box width={11}><Text color={TEXT.dim}>ENC</Text></Box>
         <Box width={6}><Text color={TEXT.dim}>SIG</Text></Box>
-        <Box><Text color={TEXT.dim}>BCN</Text></Box>
+        <Box><Text color={TEXT.dim}>GPS (lat,lon)</Text></Box>
       </Box>
       {aps.length === 0 ? (
         <Text color={TEXT.dim}>no APs yet — start a scan (Control → s)</Text>
       ) : (
         win.slice.map((a) => {
           const on = aps.indexOf(a) === sel;
+          const gps = gpsCell(a);
           return (
             <Box key={a.bssid}>
               <Box width={3}><Text color={on ? COLORS.violet : TEXT.dim}>{on ? "› " : "  "}</Text></Box>
-              <Box width={20}><Text color={on ? TEXT.hi : TEXT.body}>{a.bssid}</Text></Box>
-              <Box width={20}><Text color={a.essid ? COLORS.violet : TEXT.dim} wrap="truncate-end">{a.essid || "— hidden"}</Text></Box>
-              <Box width={5}><Text color={TEXT.body}>{a.channel || "?"}</Text></Box>
-              <Box width={12}><Text color={COLORS[encColor(a.encryption)]}>{a.encryption || "?"}{a.wps ? " W" : ""}</Text></Box>
+              <Box width={18}><Text color={on ? TEXT.hi : TEXT.body}>{a.bssid}</Text></Box>
+              <Box width={18}><Text color={a.essid ? COLORS.violet : TEXT.dim} wrap="truncate-end">{a.essid || "— hidden"}</Text></Box>
+              <Box width={4}><Text color={TEXT.body}>{a.channel || "?"}</Text></Box>
+              <Box width={11}><Text color={COLORS[encColor(a.encryption)]}>{a.encryption || "?"}{a.wps ? " W" : ""}</Text></Box>
               <Box width={6}><Text color={COLORS[sigColor(a.signal)]}>{a.signal}</Text></Box>
-              <Box><Text color={TEXT.dim}>{a.beacons}</Text></Box>
+              <Box><Text color={gps.color === "dim" ? TEXT.dim : COLORS[gps.color]} wrap="truncate-end">{gps.text}</Text></Box>
             </Box>
           );
         })
