@@ -306,9 +306,17 @@ async def _locate_start(bssid: str, channel: int | None, iface: str | None) -> d
         raise HTTPException(500, f"monitor-mode setup failed: {(out + err).strip()[:200]}")
     mon = "mon0"
     await _run([_tool("iw"), "dev", mon, "set", "channel", str(channel)], sudo=True, timeout=6)
+    # MAC LOCK on the TRANSMITTER address: every frame physically sent BY the
+    # target (wlan.ta == its MAC) — for an AP that's its beacons + downlink data;
+    # for a client it's its uplink frames. The radiotap RSSI of a frame the target
+    # transmitted IS the target's signal at the deck, so this attributes signal to
+    # the right radio (filtering on wlan.bssid would also catch OTHER devices'
+    # frames in that BSS, whose RSSI is theirs, not the target's). Works for any
+    # MAC — AP or a specific client device — and yields more samples than beacons
+    # alone → a smoother, faster meter.
     argv = [
         _tool("tshark"), "-i", mon, "-l", "-n",
-        "-Y", f"wlan.bssid=={bssid} && (wlan.fc.type_subtype==0x08||wlan.fc.type_subtype==0x05)",
+        "-Y", f"wlan.ta=={bssid}",
         "-T", "fields", "-e", "frame.time_epoch", "-e", "radiotap.dbm_antsignal",
     ]
     proc = await asyncio.create_subprocess_exec(
