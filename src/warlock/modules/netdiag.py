@@ -262,6 +262,59 @@ async def _iperf(server: str, secs: int = 5) -> dict[str, Any]:
             "down_mbps": round((recv or 0) / 1e6, 1), "up_mbps": round((send or 0) / 1e6, 1)}
 
 
+# ----- A10: link integrity (error counters, duplex mismatch, flap) -----------
+
+_ERR_HINTS = ("err", "crc", "fcs", "align", "drop", "collision", "underrun",
+              "overrun", "fifo", "missed", "runt", "jabber", "length", "carrier_sense")
+
+
+async def _ethtool_errors(iface: str) -> dict[str, Any]:
+    rc, out, _ = await _run([_tool("ethtool"), "-S", iface], timeout=8, sudo=True)
+    if rc != 0:
+        return {"available": False}
+    counters: dict[str, int] = {}
+    for line in out.splitlines():
+        k, sep, v = line.strip().partition(":")
+        v = v.strip()
+        if sep and v.lstrip("-").isdigit() and any(h in k for h in _ERR_HINTS):
+            counters[k] = int(v)
+    late = sum(v for k, v in counters.items() if "late_collision" in k)
+    colls = sum(v for k, v in counters.items() if "collision" in k)
+    return {"available": True, "nonzero": {k: v for k, v in counters.items() if v},
+            "late_collisions": late, "collisions_total": colls, "counter_count": len(counters)}
+
+
+def _kernel_errors(iface: str) -> dict[str, Any]:
+    base = f"/sys/class/net/{iface}/statistics"
+
+    def rd(n: str) -> int | None:
+        try:
+            return int(open(os.path.join(base, n)).read().strip())
+        except OSError:
+            return None
+
+    return {k: rd(k) for k in ("rx_errors", "tx_errors", "rx_dropped", "tx_dropped",
+                               "rx_crc_errors", "rx_frame_errors", "rx_fifo_errors",
+                               "collisions", "rx_missed_errors")}
+
+
+def _flap_counters(iface: str) -> dict[str, Any]:
+    base = f"/sys/class/net/{iface}"
+
+    def rd(n: str) -> str | None:
+        try:
+            return open(os.path.join(base, n)).read().strip()
+        except OSError:
+            return None
+
+    def num(n: str) -> int | None:
+        v = rd(n)
+        return int(v) if (v or "").isdigit() else None
+
+    return {"carrier": rd("carrier") == "1", "carrier_changes": num("carrier_changes"),
+            "carrier_up_count": num("carrier_up_count"), "carrier_down_count": num("carrier_down_count")}
+
+
 # ----- verdict roll-up (LinkRunner-style PASS/WARN/FAIL) ----------------------
 
 def _rollup(link: dict, svc: dict, path: dict) -> dict[str, Any]:
@@ -317,6 +370,10 @@ class PathReq(BaseModel):
 class ThroughputReq(BaseModel):
     server: str
     secs: int = Field(default=5, ge=1, le=30)
+
+
+class FlapReq(IfaceReq):
+    watch_secs: int = Field(default=0, ge=0, le=30)
 
 
 class HealthReq(BaseModel):
@@ -416,5 +473,46 @@ class Module(ModuleBase):
                    f"overall={verdict['overall']}", verdict["overall"].lower())
             return {"ok": True, "iface": iface, "verdict": verdict,
                     "link": link, "services": svc, "path": path}
+
+        @r.post("/errors")
+        async def errors_ep(req: IfaceReq) -> dict[str, Any]:
+            """Interface error counters + duplex-mismatch heuristic (late collisions)."""
+            iface = await _iface_or_default(req.iface)
+            eth = await _ethtool_errors(iface)
+            kern = _kernel_errors(iface)
+            late = eth.get("late_collisions", 0) or 0
+            err_present = bool(eth.get("nonzero")) or any(
+                (v or 0) for k, v in kern.items() if "error" in k or "crc" in k)
+            verdict = "FAIL" if late > 0 else ("WARN" if err_present else "PASS")
+            notes = []
+            if late > 0:
+                notes.append(f"{late} late collisions — possible DUPLEX MISMATCH / cabling fault")
+            elif err_present:
+                notes.append("interface errors present — inspect cable / port / SFP")
+            return {"ok": True, "iface": iface, "verdict": verdict,
+                    "duplex": (await _link(iface)).get("wired", {}).get("duplex"),
+                    "ethtool": eth, "kernel": kern, "notes": notes}
+
+        @r.post("/flap")
+        async def flap_ep(req: FlapReq) -> dict[str, Any]:
+            """Link-flap detector — cumulative carrier transitions + optional live watch."""
+            iface = await _iface_or_default(req.iface)
+            before = _flap_counters(iface)
+            window = None
+            if req.watch_secs:
+                await asyncio.sleep(req.watch_secs)
+                after = _flap_counters(iface)
+                window = {"secs": req.watch_secs,
+                          "new_changes": (after.get("carrier_changes") or 0) - (before.get("carrier_changes") or 0)}
+            ch = before.get("carrier_changes")
+            if window and window["new_changes"] > 0:
+                verdict = "FAIL"
+                note = f"{window['new_changes']} flap(s) during a {req.watch_secs}s watch — LINK IS FLAPPING"
+            elif ch == 0:
+                verdict, note = "PASS", "stable — no carrier transitions since boot"
+            else:
+                verdict = "WARN"
+                note = f"{ch} carrier transitions since boot ({before.get('carrier_down_count')} down) — investigate if unexpected"
+            return {"ok": True, "iface": iface, "verdict": verdict, "flap": before, "window": window, "note": note}
 
         return r
