@@ -23,12 +23,17 @@ from warlock.aar.keystore import KeyStore, b64u, b64u_decode
 
 
 def _strip(value: Any) -> Any:
-    """Recursively drop the ``sig`` field and any ``_``-prefixed annotation at
-    every level (mirrors the reference verifier's strip exactly)."""
+    """Recursively drop the ``sig`` field, the ``log`` L3 receipt, and any
+    ``_``-prefixed annotation at every level. ``log`` is stripped for the same
+    reason as ``sig``: the transparency-log receipt is attached AFTER signing
+    (it commits ``sha256(canonical(record))``, which can't exist until the
+    record is signed), so it must not be part of the signed/committed preimage.
+    Stripping it is a no-op on pre-L3 records, so existing signatures still
+    verify. Mirrors the verify.html / acp-ingest strip exactly."""
     if isinstance(value, list):
         return [_strip(v) for v in value]
     if isinstance(value, dict):
-        return {k: _strip(v) for k, v in value.items() if k != "sig" and not k.startswith("_")}
+        return {k: _strip(v) for k, v in value.items() if k not in ("sig", "log") and not k.startswith("_")}
     return value
 
 

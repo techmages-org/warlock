@@ -129,6 +129,46 @@ def build_record(*, kind: str, command: str, target: str, note: str, outcome: st
     return record, preimage, task_id
 
 
+def _attach_log(record: dict, task_id: str) -> None:
+    """Best-effort L3: commit ``sha256(canonical(record))`` to the transparency log
+    and embed the signed leaf receipt as ``record["log"]`` (then re-persist). The
+    record is already signed; ``log`` is stripped by ``canonicalize_record`` so it
+    is NOT part of the signed/committed preimage and the hash is stable whether or
+    not the receipt is present. Offline-tolerant: a missing/unreachable log just
+    leaves the record at L1 — never raises into the emit path."""
+    import hashlib
+    import json
+    import urllib.request
+
+    settings = get_settings()
+    url = (settings.aar_log_url or "").strip()
+    if not url:
+        return
+    h = b64u(hashlib.sha256(canonicalize_record(record)).digest())
+    body = json.dumps({"hash": h}).encode("utf-8")
+    req = urllib.request.Request(
+        url.rstrip("/"), data=body, headers={"content-type": "application/json"}, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=4) as r:  # noqa: S310 — operator-configured log URL
+            if r.status not in (200, 201):
+                return
+            leaf = json.loads(r.read().decode())
+    except Exception:  # noqa: BLE001 — L3 is additive + offline-tolerant
+        log.warning("L3 log-attach failed (non-fatal); record stays L1", exc_info=True)
+        return
+    # Receipt: the logical log identity + the committed leaf (leaf_index/root/sig).
+    record["log"] = {
+        "host": settings.aar_log_host,
+        "leaf_index": leaf.get("leaf_index"),
+        "hash": leaf.get("hash"),
+        "root": leaf.get("root"),
+        "timestamp": leaf.get("timestamp"),
+        "sig": leaf.get("sig"),
+    }
+    store.write_record(task_id, record)
+
+
 def emit_for_audit(*, kind: str, command: str = "", target: str = "", note: str = "", outcome: str = "") -> str | None:
     """Build → sign → persist an AAR for one audit event. Returns the task id, or
     None when AAR is disabled or the kind is not attested. Raises on real errors
@@ -145,7 +185,11 @@ def emit_for_audit(*, kind: str, command: str = "", target: str = "", note: str 
     sign(record, keystore=keystore, by=subject)  # sign LAST
     preimage_mod.store_preimage(task_id, preimage)
     store.write_record(task_id, record)
+    # L3: best-effort transparency-log commitment (embeds `log`, re-persists).
+    _attach_log(record, task_id)
     # Advance the chain: next record from this subject carries this record's hash.
+    # canonicalize_record strips `log`, so the prior hash is identical with or
+    # without the receipt attached.
     import hashlib
 
     store.set_prior(subject, b64u(hashlib.sha256(canonicalize_record(record)).digest()))
