@@ -9,10 +9,16 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 from warlock.config import get_settings
 
 router = APIRouter(prefix="/api/aar", tags=["aar"])
+
+
+class PushIn(BaseModel):
+    ingest_url: str
+    grant_ref: str | None = None
 
 
 @router.get("/status")
@@ -55,6 +61,17 @@ def record(task_id: str) -> dict[str, Any]:
     if rec is None:
         raise HTTPException(404, "record not found")
     return rec
+
+
+@router.post("/push")
+def push(body: PushIn) -> dict[str, Any]:
+    """Roll the active engagement's AARs + a report/manifest UP to an ingest server
+    (Track B / B4). Each upload is console-signed (acp-signature). The server gates
+    on enrollment + grant — an enrolled console with a valid in-scope grant_ref gets
+    202; a revoked/unenrolled console or missing grant is refused (and logged)."""
+    from warlock.aar import producer
+
+    return producer.push_engagement(ingest_url=body.ingest_url, grant_ref=body.grant_ref)
 
 
 @router.get("/preimage/{task_id}")
