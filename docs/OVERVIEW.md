@@ -234,7 +234,7 @@ a product you buy.
 | **Upgrade kit** | [Hacker Gadgets](https://hackergadgets.com/products/uconsole-upgrade-kit?variant=47045223383214) | CM4/CM5 adapter + NVMe board + **dual-18650 battery** holder. **Boots from NVMe.** |
 | **Storage** | *(source your own)* | **Any M.2 NVMe SSD** — pick your capacity. The deck boots from it. |
 | **AIO V2** | [Hacker Gadgets](https://hackergadgets.com/products/uconsole-aio-v2?variant=47045380735150) | The radio board: RTL-SDR + LoRa **SX1262** + **GPS+PPS** + **PCF85063A RTC** + internal USB hub + USB 3.0 + RJ45 |
-| **Wi-Fi (attack)** | [Hacker Gadgets](https://hackergadgets.com/products/ac1200-usb-c-wifi-card) | **AC1200 USB-C Wi-Fi card** (MediaTek MT7961) — monitor mode + injection, rides the AIO's internal USB |
+| **Wi-Fi (attack)** | [Hacker Gadgets](https://hackergadgets.com/products/ac1200-usb-c-wifi-card) | **AC1200 USB-C Wi-Fi card** (MediaTek **MT7921AUN**; some units MT7961) — Wi-Fi 6/6E monitor + injection **and Bluetooth 5.2**; rides the AIO's internal USB. Full radio spec: [HARDWARE.md](HARDWARE.md) |
 | **SDR (RX)** | — | RTL2838 (RTL-SDR) on the AIO; HackRF for TX/replay |
 | **GPS** | — | u-blox on UART (`/dev/ttyAMA0`) with 1PPS (on the AIO) |
 | **Optional** | — | ESP32 companion (`esp32_companion` module) |
