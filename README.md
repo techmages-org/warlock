@@ -241,7 +241,7 @@ into a real cyberdeck. **This project couldn't exist without their hardware.**
 | **Upgrade kit** | [Hacker Gadgets](https://hackergadgets.com/products/uconsole-upgrade-kit?variant=47045223383214) | CM4/CM5 adapter + NVMe board + **dual-18650 battery**. **Boots from NVMe.** |
 | **Storage** | *source your own* | **Any M.2 NVMe SSD** — your choice of capacity |
 | **AIO V2** | [Hacker Gadgets](https://hackergadgets.com/products/uconsole-aio-v2?variant=47045380735150) | The radio board: **RTL-SDR + LoRa SX1262 + GPS/PPS + RTC + internal USB hub + RJ45** |
-| **AC1200 Wi-Fi** | [Hacker Gadgets](https://hackergadgets.com/products/ac1200-usb-c-wifi-card) | AC1200 USB-C card — **monitor mode + injection**, rides the AIO's internal USB |
+| **AC1200 Wi-Fi** | [Hacker Gadgets](https://hackergadgets.com/products/ac1200-usb-c-wifi-card) | AC1200 USB-C card (**MediaTek MT7921AUN**) — Wi-Fi 6/6E **monitor mode + injection** *and* **Bluetooth 5.2**; rides the AIO's internal USB |
 | **SDR (TX)** | — | **HackRF** for replay/transmit (RX is the AIO's RTL-SDR) |
 | **OS** | — | Debian 13 (trixie), aarch64 |
 
@@ -251,8 +251,9 @@ into a real cyberdeck. **This project couldn't exist without their hardware.**
 > Wi-Fi card** for monitor mode. Drop in a **CM5**, source any M.2 NVMe, and you have the
 > deck Warlock runs on.
 
-Full wiring, GPIO power-rail map, and per-subsystem health probes are in
-[docs/OVERVIEW.md §5](docs/OVERVIEW.md).
+📋 **Complete chipset-level spec — every board, every radio, what it can and can't do:
+[docs/HARDWARE.md](docs/HARDWARE.md).** Full wiring, GPIO power-rail map, and
+per-subsystem health probes are in [docs/OVERVIEW.md §5](docs/OVERVIEW.md).
 
 ---
 
