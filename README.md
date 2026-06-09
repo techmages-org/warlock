@@ -251,9 +251,10 @@ into a real cyberdeck. **This project couldn't exist without their hardware.**
 > Wi-Fi card** for monitor mode. Drop in a **CM5**, source any M.2 NVMe, and you have the
 > deck Warlock runs on.
 
-📋 **Complete chipset-level spec — every board, every radio, what it can and can't do:
-[docs/HARDWARE.md](docs/HARDWARE.md).** Full wiring, GPIO power-rail map, and
-per-subsystem health probes are in [docs/OVERVIEW.md §5](docs/OVERVIEW.md).
+📋 **Complete specs:** [**docs/HARDWARE.md**](docs/HARDWARE.md) — every board, every
+radio, what it can and can't do · [**docs/SOFTWARE.md**](docs/SOFTWARE.md) — OS, app
+stack, every module, tooling versions, the attestation crypto. Full wiring + GPIO
+power-rail map + per-subsystem health probes are in [docs/OVERVIEW.md §5](docs/OVERVIEW.md).
 
 ---
 
