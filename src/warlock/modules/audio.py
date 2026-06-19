@@ -85,9 +85,9 @@ def _parse_status(text: str) -> dict[str, Any]:
                 head, tail = rest.split("[vol:", 1)
                 rest = head.strip()
                 vol_str = tail.split("]", 1)[0].strip()
-                # vol may be "1.00" or "1.00 [MUTED]"
+                # vol may be "1.00" or "1.00 [MUTED" (closing ] consumed by split)
                 muted = "MUTED" in vol_str
-                vol_str = vol_str.replace("[MUTED]", "").strip()
+                vol_str = vol_str.replace("[MUTED", "").replace("MUTED", "").strip()
                 try:
                     vol = float(vol_str)
                 except ValueError:
