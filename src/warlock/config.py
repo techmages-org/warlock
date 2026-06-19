@@ -59,6 +59,17 @@ class Settings(BaseSettings):
     gpsd_port: int = Field(default=2947)
     socket_path: Path = Field(default=Path("/run/warlock/warlock.sock"))
     web_dist: Path = Field(default=Path("/opt/warlock/web/dist"))
+    # Mapbox — public token (safe for browser; set WARLOCK_MAPBOX_API_KEY=xxx)
+    mapbox_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("WARLOCK_MAPBOX_API_KEY", "mapbox_api_key"),
+        description="Mapbox public API key for tile layers and geocoding",
+    )
+    mapbox_style: str = Field(
+        default="mapbox/dark-v11",
+        validation_alias=AliasChoices("WARLOCK_MAPBOX_STYLE", "mapbox_style"),
+        description="Mapbox style ID (e.g. mapbox/dark-v11, mapbox/streets-v12)",
+    )
 
     @property
     def db_url(self) -> str:

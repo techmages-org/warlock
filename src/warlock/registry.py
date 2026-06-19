@@ -26,6 +26,8 @@ TAB_ORDER: list[str] = [
     "report",
     "reports",
     "loot",
+    "maps",
+    "retention",
     "sdr_offensive",
     "esp32_companion",
     "wireless_ids",

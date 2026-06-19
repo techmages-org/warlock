@@ -3,6 +3,7 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { apiGet, apiPost } from "../lib/api";
 import { BigValue, ModuleHeader, Tile } from "../components/hud";
+import WardriveMap from "../components/WardriveMap";
 
 type FixResp = {
   ok: boolean;
@@ -64,13 +65,14 @@ type TracksResp = {
   recording: { active: boolean; filename?: string | null; points?: number; started_at?: string | null };
 };
 
-type Tab = "position" | "map" | "sats" | "tracks";
+type Tab = "position" | "map" | "sats" | "tracks" | "wardrive";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "position", label: "Position" },
   { id: "map", label: "Map" },
   { id: "sats", label: "Sat View" },
   { id: "tracks", label: "Tracks" },
+  { id: "wardrive", label: "Wardrive Map" },
 ];
 
 export function Gps() {
@@ -171,6 +173,13 @@ export function Gps() {
       {tab === "sats" && <SatsTab sats={sats} />}
       {tab === "tracks" && (
         <TracksTab data={tracks} reload={() => apiGet<TracksResp>("/api/gps/tracks").then(setTracks).catch(() => {})} />
+      )}
+      {tab === "wardrive" && (
+        <div className="space-y-3">
+          <Tile title="WARDRIVE MAP" led="cyan">
+            <WardriveMap />
+          </Tile>
+        </div>
       )}
     </div>
   );

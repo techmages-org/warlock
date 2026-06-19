@@ -8,6 +8,7 @@ import { Audit } from "./pages/Audit";
 import { Blue } from "./pages/Blue";
 import { Crack } from "./pages/Crack";
 import { Dashboard } from "./pages/Dashboard";
+import { Esp32Companion } from "./pages/Esp32Companion";
 import { Gps } from "./pages/Gps";
 import { Loot } from "./pages/Loot";
 import { Mesh } from "./pages/Mesh";
@@ -25,7 +26,6 @@ import { Wireless } from "./pages/Wireless";
 // Modules still rendered via the fallback StubPanel (no dedicated page yet).
 const STUBBED = [
   "wifi_offensive",
-  "esp32_companion",
 ];
 
 /* ---------- nav grouping ---------- */
@@ -251,6 +251,8 @@ export default function App() {
           <Route path="/wifi-analyzer" element={<WifiAnalyzer />} />
           <Route path="/wireless" element={<Wireless />} />
           <Route path="/crack" element={<Crack />} />
+          <Route path="/esp32_companion" element={<Esp32Companion />} />
+          <Route path="/esp32-companion" element={<Esp32Companion />} />
           <Route path="/sdr" element={<Sdr />} />
           <Route path="/sdr_offensive" element={<SdrOffensive />} />
           <Route path="/sdr-offensive" element={<SdrOffensive />} />

@@ -212,6 +212,22 @@ def _sdr_devices() -> dict:
         return {"ok": False, "reason": str(e)}
 
 
+def _read_battery() -> dict:
+    """Read battery capacity and charging status from sysfs."""
+    psys = Path("/sys/class/power_supply")
+    for bat in psys.iterdir():
+        if (bat / "type").read_text().strip() != "Battery":
+            continue
+        cap_p = bat / "capacity"
+        status_p = bat / "status"
+        if not cap_p.exists():
+            continue
+        cap = int(cap_p.read_text().strip())
+        status = status_p.read_text().strip() if status_p.exists() else "Unknown"
+        return {"capacity": cap, "status": status}
+    return {"capacity": None, "status": "No battery"}
+
+
 class Module(ModuleBase):
     id = "dashboard"
     label = "Dashboard"
@@ -272,6 +288,7 @@ class Module(ModuleBase):
                 "disk_root_mb_free": round(du.free / 1_048_576, 1),
                 "disk_root_percent": du.percent,
                 "rtc_drift_s": rtc_drift,
+                "battery": _read_battery(),
                 "chrony": chrony,
                 "gps": gps,
                 "nmcli_active": nmcli,

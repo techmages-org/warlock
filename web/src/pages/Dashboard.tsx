@@ -190,6 +190,18 @@ export function Dashboard() {
           </div>
         </Tile>
 
+        <Tile title="BATTERY" led={s.battery.capacity != null && s.battery.capacity < 15 ? severityLed("err") : severityLed("ok")}>
+          <BigValue
+            value={s.battery.capacity != null ? String(s.battery.capacity) : "--"}
+            unit="%"
+            color={s.battery.capacity != null && s.battery.capacity < 15 ? "pink" : "mint"}
+            flashOnChange
+          />
+          <div className="mt-2 text-txt-dim">
+            {s.battery.status}
+          </div>
+        </Tile>
+
         <Tile title="CHRONY / NTP" led={chronyLed}>
           <BigValue
             value={s.chrony.ok ? `stratum ${s.chrony.stratum ?? "?"}` : "offline"}

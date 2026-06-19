@@ -58,6 +58,7 @@ export type DashboardStatus = {
   throttled: string | null;
   disk_root_mb_free: number;
   disk_root_percent: number;
+  battery: { capacity: number | null; status: string };
   rtc_drift_s: number | null;
   chrony: { ok: boolean; stratum?: number; offset_s?: number; source?: string; reason?: string };
   gps: { ok: boolean; mode?: number; lat?: number; lon?: number; alt?: number; reason?: string };
