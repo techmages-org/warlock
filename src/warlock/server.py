@@ -42,6 +42,10 @@ def _check_auth(conn: HTTPConnection) -> None:
     """
     if conn.url.path in _UNAUTHED_PATHS or conn.url.path.startswith("/ws/"):
         return
+    # DID documents are public by design — did:web resolvers must fetch them
+    # without credentials.
+    if conn.url.path.endswith("/.well-known/did.json"):
+        return
     if conn.scope.get("type") == "websocket":
         return
     if check_basic_auth(conn.headers.get("authorization")):
@@ -159,6 +163,34 @@ def create_app() -> FastAPI:
             for m in modules
         ]
 
+    # --- DID document endpoints (public, no auth) ---
+    # did:web resolves by fetching /.well-known/did.json (bare) or
+    # /<path>/.well-known/did.json (path-suffixed). We serve both so the
+    # deck's public key is reachable regardless of DID shape.
+    from warlock.aar.did import deck_did_document
+
+    @app.get("/.well-known/did.json")
+    def well_known_did() -> JSONResponse:
+        return JSONResponse(deck_did_document())
+
+    @app.get("/{deck_id}/.well-known/did.json")
+    def well_known_did_deck(deck_id: str) -> JSONResponse:
+        """Path-suffixed DID resolution (did:web:host:deck-id).
+
+        Only serves the document when deck_id matches the configured DID path
+        segment — a random path should NOT leak the deck's public key."""
+        subject = _settings.aar_subject_did
+        # Extract the last colon-separated segment from the DID.
+        parts = subject.split(":")
+        if len(parts) < 4:
+            if deck_id == "well-known":
+                raise HTTPException(404)
+            return JSONResponse(deck_did_document())
+        expected = parts[-1]  # e.g. "warlock-cm5-01"
+        if deck_id != expected:
+            raise HTTPException(status_code=404, detail="unknown deck")
+        return JSONResponse(deck_did_document())
+
     # Static web build.
     web_dist: Path = _settings.web_dist
     if web_dist.exists() and (web_dist / "index.html").exists():
@@ -178,6 +210,7 @@ def create_app() -> FastAPI:
                 or full_path.startswith("web/")
                 or full_path == "favicon.ico"
                 or full_path == "robots.txt"
+                or ".well-known/" in full_path
             ):
                 from fastapi import HTTPException
                 raise HTTPException(status_code=404, detail="Not Found")
