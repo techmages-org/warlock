@@ -43,8 +43,8 @@ SSID a client probes for) so there is no single target — it gates on
 engagement-mode-active ONLY (``target=""`` -> refuse when OFF, audit every
 start) and never bypasses the engagement gate.
 
-Deferred (clear TODO stub, returns HTTP 501): WPA-Enterprise harvester
-(eaphammer — not installed on the device).
+Deferred (clear TODO stub): Auto-enqueue crack on capture completion
+(job-completion wiring — see TODO_ITEMS).
 See ``02-warlock-command-center.md`` (Module 6) for the full spec.
 """
 from __future__ import annotations
