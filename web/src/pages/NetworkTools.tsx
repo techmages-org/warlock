@@ -60,12 +60,13 @@ type PortScanResp = {
 type SubnetResp = {
   ok: boolean;
   network: string;
+  prefix: number;
   netmask: string;
   broadcast: string;
-  host_min: string;
-  host_max: string;
-  num_hosts: number;
-  cidr: string;
+  total_addresses: number;
+  usable_hosts: number;
+  first_host: string;
+  last_host: string;
   version: number;
 };
 
@@ -376,19 +377,19 @@ export function NetworkTools() {
           {subnet && (
             <Tile title="SUBNET" led="cyan">
               <div className="space-y-0.5 text-sm">
-                <div className="text-violet-bright font-mono text-base">{subnet.cidr}</div>
+                <div className="text-violet-bright font-mono text-base">{subnet.network}/{subnet.prefix}</div>
                 <div className="flex justify-between text-xs">
                   <span className="text-txt-dim">Netmask</span>
                   <span className="text-txt-body font-mono">{subnet.netmask}</span>
                 </div>
                 <div className="flex justify-between text-xs">
                   <span className="text-txt-dim">Hosts</span>
-                  <span className="text-amber-base">{subnet.num_hosts.toLocaleString()}</span>
+                  <span className="text-amber-base">{subnet.usable_hosts.toLocaleString()}</span>
                 </div>
                 <div className="flex justify-between text-xs">
                   <span className="text-txt-dim">Range</span>
                   <span className="text-txt-body font-mono text-[0.65rem]">
-                    {subnet.host_min}–{subnet.host_max}
+                    {subnet.first_host}–{subnet.last_host}
                   </span>
                 </div>
                 <div className="flex justify-between text-xs">
