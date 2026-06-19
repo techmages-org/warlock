@@ -13,6 +13,7 @@ import { Gps } from "./pages/Gps";
 import { Loot } from "./pages/Loot";
 import { Mesh } from "./pages/Mesh";
 import { NetRecon } from "./pages/NetRecon";
+import { NetworkTools } from "./pages/NetworkTools";
 import { Ops } from "./pages/Ops";
 import { Reports } from "./pages/Reports";
 import { Sdr } from "./pages/Sdr";
@@ -37,7 +38,6 @@ type NavGroup = { id: string; label: string; icon: string; entries: NavEntry[] }
 const MODULE_GROUP: Record<string, string> = {
   wifi_recon: "recon",
   wifi_analyzer: "recon",
-  net_recon: "recon",
   gps: "recon",
   mesh: "recon",
   sdr: "recon",
@@ -56,6 +56,7 @@ const MODULE_GROUP: Record<string, string> = {
   netdiag: "tools",
   nettools: "tools",
   voip: "tools",
+  net_recon: "tools",
 
   loot: "intel",
   reports: "intel",
@@ -256,8 +257,11 @@ export default function App() {
           <Route path="/sdr" element={<Sdr />} />
           <Route path="/sdr_offensive" element={<SdrOffensive />} />
           <Route path="/sdr-offensive" element={<SdrOffensive />} />
-          <Route path="/net_recon" element={<NetRecon />} />
-          <Route path="/net-recon" element={<NetRecon />} />
+          <Route path="/net_recon" element={<NetworkTools />} />
+          <Route path="/net-recon" element={<NetworkTools />} />
+          <Route path="/netdiag" element={<NetworkTools />} />
+          <Route path="/nettools" element={<NetworkTools />} />
+          <Route path="/voip" element={<NetworkTools />} />
           <Route path="/wireless_ids" element={<Blue />} />
           <Route path="/blue" element={<Blue />} />
           <Route path="/server_audit" element={<Audit />} />
