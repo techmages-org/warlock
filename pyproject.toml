@@ -38,5 +38,16 @@ warlock-tui = "warlock.tui.app:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/warlock"]
 
+[tool.pytest.ini_options]
+filterwarnings = [
+    # datetime.utcnow() is deprecated in 3.12+ but the migration to
+    # timezone-aware datetimes touches 46 call sites across 15 files and
+    # risks subtle naive-vs-aware comparison bugs. Tracked as tech debt.
+    "ignore:.*datetime.datetime.utcnow.*:DeprecationWarning",
+    "ignore:.*datetime.datetime.utcfromtimestamp.*:DeprecationWarning",
+    "ignore::DeprecationWarning:starlette.*",
+    "ignore::DeprecationWarning:httpx.*",
+]
+
 [tool.hatch.metadata]
 allow-direct-references = true

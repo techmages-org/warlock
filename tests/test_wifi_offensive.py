@@ -622,13 +622,12 @@ def test_in_scope_karma_submits_gated_without_target(client, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# Still-deferred ops are stubbed (501) but the routes exist
-# (wps is now implemented — see the WPS section below)
+# eaphammer is now implemented — it's engagement-gated like all offensive ops.
+# Without an engagement, it returns 403.
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("op", ["eaphammer"])
-def test_deferred_ops_return_501(client, op):
-    r = client.post(f"/api/wifi_offensive/{op}")
-    assert r.status_code == 501
+def test_eaphammer_returns_403_without_engagement(client):
+    r = client.post("/api/wifi_offensive/eaphammer", json={"ssid": "TestEAP"})
+    assert r.status_code == 403
 
 
 # --------------------------------------------------------------------------- #
