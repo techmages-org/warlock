@@ -3,7 +3,7 @@
 // ARP sweep of all hosts with OUI-based device classification, port scanning.
 //
 // Backed by existing netdiag + net_recon + nettools APIs.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { apiGet, apiPost } from "../lib/api";
 import { BigValue, ModuleHeader, Tile, type LEDColor } from "../components/hud";
 
@@ -418,7 +418,7 @@ export function NetworkTools() {
                 </tr>
               </thead>
               <tbody>
-                {hosts.sort((a, b) => {
+                {[...hosts].sort((a, b) => {
                   const ta = classifyDevice(a, gateway_ip);
                   const tb = classifyDevice(b, gateway_ip);
                   const oa = order.indexOf(ta);
@@ -430,7 +430,7 @@ export function NetworkTools() {
                   const openPorts = h.ports.filter(p => p.state === "open");
                   const isSelected = selectedHost?.ip === h.ip;
                   return (
-                    <>
+                    <Fragment key={h.ip}>
                       <tr
                         key={h.ip}
                         className={`border-b border-line-dim/40 cursor-pointer transition-colors ${isSelected ? "bg-cyan-signal/5" : "hover:bg-bg-strip/50"}`}
@@ -507,7 +507,7 @@ export function NetworkTools() {
                           </td>
                         </tr>
                       )}
-                    </>
+                    </Fragment>
                   );
                 })}
               </tbody>
