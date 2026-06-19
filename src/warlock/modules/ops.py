@@ -742,6 +742,8 @@ class Module(ModuleBase):
                 "name": st["name"],
                 "scope": st["scope"],
                 "started_at": st["started_at"],
+                "planned_end": st.get("planned_end"),
+                "remaining_s": st.get("remaining_s"),
                 "elapsed_s": _elapsed_s(engagement.started_at),
                 "auth_statement": engagement.auth_statement if engagement.is_on() else "",
             }
@@ -772,11 +774,14 @@ class Module(ModuleBase):
                     s.flush()
                     eid = eng.id
                 try:
+                    from datetime import datetime as _dt
+                    planned_end_dt = _dt.utcnow() + timedelta(hours=body.duration_hours)
                     await engagement.activate(
                         name=body.name,
                         auth_statement=body.authorization,
                         scope=scope,
                         engagement_id=eid,
+                        planned_end=planned_end_dt,
                     )
                 except (RuntimeError, ValueError) as e:
                     raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e

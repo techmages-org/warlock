@@ -93,6 +93,7 @@ class EngagementMode:
         self.auth_statement: str = ""
         self.scope: ScopeAllowlist = ScopeAllowlist()
         self.started_at: datetime | None = None
+        self.planned_end: datetime | None = None
         self.audit_log_path: Path | None = None
 
     # --- state ---
@@ -100,13 +101,27 @@ class EngagementMode:
         return self._mode == "on"
 
     def status(self) -> dict:
+        now = datetime.utcnow()
+        remaining_s: float | None = None
+        if self.planned_end and self.started_at:
+            remaining_s = (self.planned_end - now).total_seconds()
         return {
             "mode": self._mode,
             "engagement_id": self.engagement_id,
             "name": self.name,
             "scope": self.scope.to_dict(),
             "started_at": self.started_at.isoformat() if self.started_at else None,
+            "planned_end": self.planned_end.isoformat() if self.planned_end else None,
+            "remaining_s": remaining_s,
+            "auth_statement": self.auth_statement,
+            "elapsed_s": (now - self.started_at).total_seconds() if self.started_at else None,
         }
+
+    def is_expired(self) -> bool:
+        """True when engagement is active and planned_end has passed."""
+        if not self.is_on() or not self.planned_end:
+            return False
+        return datetime.utcnow() >= self.planned_end
 
     # --- lifecycle ---
     async def activate(
@@ -116,6 +131,7 @@ class EngagementMode:
         auth_statement: str,
         scope: ScopeAllowlist,
         engagement_id: str | None = None,
+        planned_end: datetime | None = None,
     ) -> str:
         if self._mode == "on":
             raise RuntimeError("engagement already active")
@@ -131,6 +147,7 @@ class EngagementMode:
         self.auth_statement = auth_statement
         self.scope = scope
         self.started_at = datetime.utcnow()
+        self.planned_end = planned_end
         self._mode = "on"
 
         settings = get_settings()
@@ -222,6 +239,7 @@ class EngagementMode:
         self.auth_statement = ""
         self.scope = ScopeAllowlist()
         self.started_at = None
+        self.planned_end = None
         self.audit_log_path = None
 
     async def killswitch(self) -> dict:

@@ -71,7 +71,42 @@ async def lifespan(app: FastAPI):
                 await m.on_startup()
             except Exception:  # noqa: BLE001
                 log.exception("module %s startup failed", m.id)
+
+    # Engagement auto-expiry watchdog.
+    async def _engagement_expiry_loop(eng):
+        """Check every 60s if the active engagement has passed its planned_end.
+        If so, end it gracefully (audit + AAR + scope clear). This enforces the
+        duration_hours the operator declared when arming — no engagement stays
+        live past its stated window."""
+        while True:
+            await asyncio.sleep(60)
+            try:
+                if engagement.is_expired():
+                    eid = engagement.engagement_id
+                    name = engagement.name
+                    log.warning(
+                        "engagement %s (%s) expired — auto-ending (planned_end=%s)",
+                        eid, name, engagement.planned_end,
+                    )
+                    await engagement.end()
+                    from warlock.db import session_scope
+                    from warlock.models import Engagement as EngModel
+                    from datetime import datetime as _dt
+                    with session_scope() as s:
+                        row = s.get(EngModel, eid)
+                        if row is not None:
+                            row.status = "ended"
+                            row.ended_at = _dt.utcnow()
+            except Exception:  # noqa: BLE001 — watchdog must never die
+                log.exception("engagement expiry watchdog error (non-fatal)")
+
+    import asyncio as _aio
+    from warlock.engagement import engagement as _eng
+    expiry_task = _aio.create_task(_engagement_expiry_loop(_eng))
+
     yield
+
+    expiry_task.cancel()
     for m in app.state.modules:
         if hasattr(m, "on_shutdown"):
             try:
